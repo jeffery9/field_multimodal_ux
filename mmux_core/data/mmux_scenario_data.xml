@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo noupdate="1">
+    <record id="scenario_warehouse" model="mmux.scenario.config">
+        <field name="code">warehouse</field>
+        <field name="name">仓库与物流</field>
+        <field name="default_input">barcode</field>
+        <field name="description">收货、上架、拣货、盘点：扫码优先 + 语音数量录入。</field>
+        <field name="geo_collect" eval="False"/>
+        <field name="geo_weight">0</field>
+    </record>
+    <record id="scenario_manufacturing" model="mmux.scenario.config">
+        <field name="code">manufacturing</field>
+        <field name="name">制造与生产现场</field>
+        <field name="default_input">voice</field>
+        <field name="description">工单执行与报工：语音优先 + 扫码定位。</field>
+        <field name="geo_collect" eval="False"/>
+        <field name="geo_weight">0</field>
+    </record>
+</odoo>

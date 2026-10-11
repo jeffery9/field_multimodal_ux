@@ -1,0 +1,264 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates id="template" xml:space="preserve">
+
+<t t-name="mmux_core.Panel">
+  <div class="o_mmux_panel d-flex flex-column gap-2 p-2">
+
+    <!-- context banner (FR-007) -->
+    <div class="o_mmux_context small text-muted">
+      <t t-if="context.res_model">
+        <i class="fa fa-crosshairs"/> <t t-out="context.res_model"/> #<t t-out="context.res_id || '—'"/>
+      </t>
+      <t t-else="">打开一条业务记录可获得完整任务上下文</t>
+    </div>
+
+    <!-- voice (FR-001) -->
+    <div class="o_mmux_voice d-flex gap-2">
+      <button class="btn btn-primary" t-att-class="state.recording and 'btn-danger' or ''"
+              t-on-click="toggleRecording" disabled="state.busy">
+        <t t-if="state.recording"><i class="fa fa-stop"/> 停止</t>
+        <t t-else=""><i class="fa fa-microphone"/> 语音</t>
+      </button>
+      <!-- hands-free: wake word + no-touch confirmation -->
+      <button class="btn btn-outline-primary" t-att-class="state.handsFree and 'btn-success' or 'btn-outline-primary'"
+              t-on-click="toggleHandsFree" disabled="state.busy">
+        <t t-if="state.handsFree"><i class="fa fa-assistive-listening-systems"/> 免手中</t>
+        <t t-else=""><i class="fa fa-hand-paper-o"/> 免手模式</t>
+      </button>
+      <t t-if="state.mediaError"><span class="text-warning small align-self-center" t-out="state.mediaError"/></t>
+    </div>
+
+    <!-- hands-free status: the worker cannot see the screen, so the loop
+         state is shown large enough to read at a glance -->
+    <t t-if="state.handsFree">
+      <div class="o_mmux_loop alert alert-info py-1 px-2 small mb-0">
+        <span class="badge bg-secondary" t-out="state.loopState"/>
+        <span class="ms-1" t-out="state.voiceNotice || '说「助手」开始'"/>
+      </div>
+      <div t-if="state.lastSpoken" class="o_mmux_spoken small text-muted">
+        <i class="fa fa-volume-up"/> <t t-out="state.lastSpoken"/>
+      </div>
+    </t>
+
+    <!-- barcode (FR-003), degrades to manual entry.
+         The camera button sits next to the box because scanning and
+         typing the same code are two ways to answer the same question;
+         whichever the hardware supports, the other still works. -->
+    <div class="o_mmux_barcode d-flex gap-2">
+      <input type="text" class="form-control" placeholder="扫描 / 输入条码后回车"
+             t-att-value="state.barcode"
+             t-on-input="onBarcodeInput"
+             t-on-keydown="ev => ev.key === 'Enter' &amp;&amp; onScan(ev)"/>
+      <button class="btn btn-outline-primary" t-on-click="() => openCapture('scan')"
+              disabled="state.busy" title="用相机扫描条码">
+        <i class="fa fa-barcode"/> 扫码
+      </button>
+    </div>
+    <div class="d-flex gap-2 flex-wrap">
+      <button class="btn btn-outline-primary btn-sm" t-on-click="() => openCapture('ocr')"
+              disabled="state.busy" title="拍下文字或标签，识别后填入">
+        <i class="fa fa-camera"/> 拍照识别
+      </button>
+      <button class="btn btn-outline-primary btn-sm" t-on-click="() => openCapture('evidence')"
+              disabled="state.busy" title="拍照作为本次操作的记录附件">
+        <i class="fa fa-paperclip"/> 拍照留证
+        <t t-if="state.photos.length">（<t t-out="state.photos.length"/>）</t>
+      </button>
+    </div>
+
+    <!-- the camera itself; it holds the voice loop's suspension while
+         open, so a stray "确认" over the preview is simply not heard -->
+    <t t-if="state.capture">
+      <MmuxCapture t-att-purpose="state.capture === 'scan' ? 'scan' : 'photo'"
+                   onBarcode="onCapturedBarcode"
+                   onCaptured="onCapturedPhoto"
+                   onClose="closeCapture"/>
+    </t>
+
+    <t t-if="state.captureNotice">
+      <div class="o_mmux_capture_notice small text-muted" t-out="state.captureNotice"/>
+    </t>
+
+    <!-- evidence photos waiting to be filed with the next execution -->
+    <t t-if="state.photos.length">
+      <div class="o_mmux_photos d-flex gap-1 flex-wrap">
+        <t t-foreach="state.photos" t-as="ph" t-key="ph_index">
+          <span class="badge bg-secondary">
+            <i class="fa fa-image"/> 照片 <t t-out="ph_index + 1"/>
+            <button class="btn-close btn-close-white ms-1" style="font-size:.6rem"
+                    t-on-click="() => removePhoto(ph_index)"/>
+          </span>
+        </t>
+      </div>
+    </t>
+
+    <div t-if="state.candidates.length > 1" class="o_mmux_candidates list-group">
+      <t t-foreach="state.candidates" t-as="cand" t-key="cand.id">
+        <button class="list-group-item list-group-item-action small"
+                t-on-click="_applyCandidate(cand)">
+          <t t-out="cand.display_name"/> <span class="text-muted">(<t t-out="cand.model"/>)</span>
+        </button>
+      </t>
+    </div>
+
+    <!-- text / transcript (FR-005) -->
+    <textarea class="form-control" rows="2" t-att-value="state.text"
+              placeholder="或直接输入指令，例如：完成120件，3件不合格"
+              t-on-input="ev => state.text = ev.target.value"/>
+    <button class="btn btn-secondary btn-sm align-self-start" t-on-click="parseIntent"
+            disabled="state.busy or !state.text.trim()">解析指令</button>
+    <button class="btn btn-outline-primary btn-sm align-self-start" t-on-click="proposePlan"
+            disabled="state.busy or !state.text.trim()">编排为多步计划</button>
+
+    <!-- plan orchestration (agent loop) -->
+    <t t-if="state.plan">
+      <div class="o_mmux_plan card">
+        <div class="card-body">
+          <div class="fw-bold"><t t-out="state.plan.name"/> <span class="badge bg-info">plan</span></div>
+          <t t-foreach="state.plan.steps" t-as="st" t-key="st.step_id">
+            <div class="small"><t t-out="st.step_id"/>: <t t-out="st.capability_id"/></div>
+          </t>
+          <button class="btn btn-primary btn-sm mt-2" t-on-click="runPlan(null)"
+                  disabled="state.busy">运行计划</button>
+        </div>
+      </div>
+    </t>
+    <t t-if="state.planRun">
+      <div class="o_mmux_planrun small alert"
+           t-att-class="state.planRun.state === 'success' ? 'alert-success' : (state.planRun.state === 'failed' or state.planRun.state === 'unknown' ? 'alert-danger' : 'alert-warning')">
+        <div class="fw-bold">计划状态：<t t-out="state.planRun.state"/></div>
+        <t t-foreach="state.planRun.steps" t-as="tr" t-key="tr.step">
+          <div><t t-out="tr.step"/> → <t t-out="tr.status"/>
+            <t t-if="tr.missing">（缺少：<t t-out="tr.missing.join(', ')"/>）</t>
+            <t t-if="tr.error">：<t t-out="tr.error"/></t>
+          </div>
+        </t>
+        <t t-if="state.planRun.state === 'input_required'">
+          <t t-set="missingNames" t-value="state.planRun.steps.filter(s => s.missing).flatMap(s => s.missing)"/>
+          <t t-foreach="[...new Set(missingNames)]" t-as="mn" t-key="mn">
+            <div class="d-flex gap-2 align-items-center mt-1">
+              <label class="text-muted w-25" t-out="mn"/>
+              <input type="text" class="form-control form-control-sm"
+                     t-on-input="ev => setPlanInput(ev, mn)"/>
+            </div>
+          </t>
+          <button class="btn btn-primary btn-sm mt-2" t-on-click="runPlan(null)"
+                  disabled="state.busy">补充后继续</button>
+        </t>
+        <t t-foreach="state.planRun.steps" t-as="cr" t-key="'c' + cr.step">
+          <t t-if="cr.status === 'awaiting_confirmation'">
+            <div class="alert alert-warning mt-2">
+              <div class="fw-bold">步骤 <t t-out="cr.step"/> 需要确认（<t t-out="cr.confirmation.risk"/>）</div>
+              <div t-out="cr.confirmation.action"/> — <t t-out="cr.confirmation.impact"/>
+              <button class="btn btn-danger btn-sm mt-2" t-on-click="runPlan(cr.step)"
+                      disabled="state.busy">确认此步骤</button>
+            </div>
+          </t>
+        </t>
+      </div>
+    </t>
+
+    <!-- LLM path unavailable: not configured / timeout / invalid JSON -->
+    <t t-if="state.parseState === 'unavailable'">
+      <div class="o_mmux_intent card border-warning">
+        <div class="card-body">
+          <div class="text-warning small">
+            语义识别服务暂不可用<t t-if="state.parseError and state.parseError.detail and state.parseError.detail.subtag">
+              （<t t-out="state.parseError.detail.subtag"/>）</t>。
+          </div>
+          <t t-if="state.parseError and state.parseError.retryable">
+            <button class="btn btn-outline-secondary btn-sm mt-2"
+                    t-on-click="parseIntent" disabled="state.busy">重试</button>
+          </t>
+          <t t-else="">
+            <div class="text-muted small mt-1">请联系管理员配置 LLM 服务后重试。</div>
+          </t>
+        </div>
+      </div>
+    </t>
+
+    <!-- parsed but matched no capability (empty intent, NOT an error) -->
+    <t t-if="state.parseState === 'empty'">
+      <div class="o_mmux_intent card">
+        <div class="card-body">
+          <div class="text-muted small">未能匹配到可执行的操作，请换个说法或补充信息。</div>
+          <t t-if="state.intent and state.intent.normalized_text">
+            <div class="text-muted small mt-1">
+              识别为：<t t-out="state.intent.normalized_text"/>
+            </div>
+          </t>
+        </div>
+      </div>
+    </t>
+
+    <!-- intent card (FR-005/6.3) -->
+    <t t-if="state.intent and state.intent.capability_id">
+      <div class="o_mmux_intent card">
+        <div class="card-body">
+          <div class="fw-bold" t-out="state.intent.capability_id"/>
+          <t t-if="state.intent.normalized_text">
+            <div class="text-muted small mb-1">
+              归一化：<t t-out="state.intent.normalized_text"/>
+            </div>
+          </t>
+          <t t-foreach="state.intent.params || {}" t-as="val" t-key="val">
+            <div class="d-flex gap-2 align-items-center mt-1">
+              <label class="small text-muted w-25" t-out="val"/>
+              <input type="text" class="form-control form-control-sm"
+                     t-att-value="state.intent.params[val]"
+                     t-on-input="ev => setParam(ev, val)"/>
+            </div>
+          </t>
+          <t t-if="state.intent.missing and state.intent.missing.length">
+            <div class="text-warning small mt-1">
+              缺少信息：<t t-out="state.intent.missing.join(', ')"/>
+            </div>
+          </t>
+          <t t-if="state.intent.ambiguous and state.intent.ambiguous.length">
+            <div class="text-warning small mt-1">
+              需确认：<t t-out="state.intent.ambiguous.join('; ')"/>
+            </div>
+          </t>
+          <button class="btn btn-primary btn-sm mt-2" t-on-click="execute(false)"
+                  disabled="state.busy">执行</button>
+        </div>
+      </div>
+    </t>
+
+    <!-- confirmation dialog (FR §6.3, risk-based) -->
+    <t t-if="state.confirming">
+      <div class="o_mmux_confirm alert alert-warning">
+        <div class="fw-bold">确认操作（<t t-out="state.confirming.risk"/>）</div>
+        <div t-out="state.confirming.action"/>
+        <div class="small">对象：<t t-out="state.confirming.record || '—'"/></div>
+        <div class="small">影响：<t t-out="state.confirming.impact"/></div>
+        <div class="mt-2 d-flex gap-2">
+          <button class="btn btn-danger btn-sm" t-on-click="execute(true)">确认执行</button>
+          <button class="btn btn-secondary btn-sm" t-on-click="state.confirming = null">取消</button>
+        </div>
+      </div>
+    </t>
+
+    <!-- result feedback (FR-017): success/failed/unknown are distinct -->
+    <t t-if="state.result">
+      <div class="o_mmux_result small"
+           t-att-class="state.result.status === 'success' ? 'alert alert-success' : (state.result.status === 'unknown' ? 'alert alert-warning' : 'alert alert-danger')">
+        <div class="fw-bold" t-out="statusLabels[state.result.status] || state.result.status"/>
+        <t t-if="state.result.error"><div t-out="state.result.error"/></t>
+        <t t-if="state.result.status === 'unknown'">
+          <div>请先在业务记录上核实实际状态，不要直接重试。</div>
+        </t>
+      </div>
+    </t>
+
+    <!-- capability list (FR-011) -->
+    <div class="o_mmux_caps small text-muted">
+      <div class="fw-bold">可用能力</div>
+      <t t-foreach="state.capabilities" t-as="cap" t-key="cap.capability_id">
+        <div><span t-out="cap.capability_id"/> — <t t-out="cap.name"/> <span class="badge bg-secondary" t-out="cap.risk"/></div>
+      </t>
+    </div>
+  </div>
+</t>
+
+</templates>

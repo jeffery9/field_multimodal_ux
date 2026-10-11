@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!--
+        The configuration form.
+
+        This is the supported way to configure the platform. Everything a
+        field worker's experience depends on — which provider answers, how
+        long to wait, whether the agent loop runs — is reachable here, with
+        labels, defaults and validation.
+
+        The equivalent raw parameters still exist (the form writes to them),
+        and advanced deployments may still set them directly for automation.
+        That is a supported escape hatch, not the documented path.
+    -->
+    <record id="action_mmux_settings" model="ir.actions.act_window">
+        <field name="name">Settings</field>
+        <field name="res_model">res.config.settings</field>
+        <field name="view_mode">form</field>
+        <field name="target">inline</field>
+        <field name="context">{'module': 'mmux_core'}</field>
+    </record>
+
+    <record id="view_mmux_settings_form" model="ir.ui.view">
+        <field name="name">res.config.settings.form.mmux</field>
+        <field name="model">res.config.settings</field>
+        <field name="arch" type="xml">
+            <form string="Multimodal UX Settings" class="o_mmux_settings">
+                <app string="Field Assistant" name="mmux_core">
+                    <block title="Semantic recognition (LLM)">
+                        <setting string="Provider"
+                                 help="The LLM is the only semantic path: every
+                                       utterance, whatever language it mixes,
+                                       goes through it. 'mock' returns
+                                       deterministic answers and never touches
+                                       the network.">
+                            <field name="mmux_llm_provider"/>
+                        </setting>
+                        <setting string="Base URL"
+                                 help="Any OpenAI-compatible endpoint. Point this
+                                       at a self-hosted server (LocalAI / vLLM)
+                                       to keep utterances on-premise.">
+                            <field name="mmux_llm_base_url"/>
+                        </setting>
+                        <setting string="API key"
+                                 help="Stored write-only: it is never sent back
+                                       to the browser. Leave empty to keep the
+                                       key that is already stored.">
+                            <field name="mmux_llm_api_key"/>
+                            <span class="text-muted ms-2" invisible="not mmux_llm_api_key_set">
+                                A key is stored.
+                            </span>
+                        </setting>
+                        <setting string="Model">
+                            <field name="mmux_llm_model"/>
+                        </setting>
+                        <setting string="Timeout">
+                            <div class="d-flex align-items-center gap-2">
+                                <field name="mmux_llm_timeout" class="oe_inline"/>
+                                <span class="text-muted">seconds</span>
+                            </div>
+                        </setting>
+                    </block>
+
+                    <block title="Speech and vision">
+                        <setting string="Speech provider">
+                            <field name="mmux_asr_provider"/>
+                        </setting>
+                        <setting string="Speech base URL">
+                            <field name="mmux_asr_base_url"/>
+                        </setting>
+                        <setting string="Speech API key"
+                                 help="Write-only, like the semantic key.">
+                            <field name="mmux_asr_api_key"/>
+                            <span class="text-muted ms-2" invisible="not mmux_asr_api_key_set">
+                                A key is stored.
+                            </span>
+                        </setting>
+                        <setting string="Speech model">
+                            <field name="mmux_asr_model"/>
+                        </setting>
+                        <setting string="Speech language"
+                                 help="Leave empty to auto-detect. Field workers
+                                       mix languages mid-sentence, so detection
+                                       is usually the better default.">
+                            <field name="mmux_asr_language"/>
+                        </setting>
+                        <setting string="Speech timeout">
+                            <div class="d-flex align-items-center gap-2">
+                                <field name="mmux_asr_timeout" class="oe_inline"/>
+                                <span class="text-muted">seconds</span>
+                            </div>
+                        </setting>
+                        <setting string="Vision provider">
+                            <field name="mmux_vision_provider"/>
+                        </setting>
+                        <setting string="Vision model">
+                            <field name="mmux_vision_model"/>
+                        </setting>
+                        <setting string="OCR provider"
+                                 help="Used when an image is analysed for OCR.
+                                       Falls back to the vision provider.">
+                            <field name="mmux_ocr_provider"/>
+                        </setting>
+                    </block>
+
+                    <block title="Agent">
+                        <setting string="Agent loop"
+                                 help="The agent selects the next task and guides
+                                       the operator through it. It only ever
+                                       CHOOSES — every write still goes through
+                                       the capability whitelist and L2
+                                       confirmation. Turning this off leaves the
+                                       guided task flow as the only path.">
+                            <field name="mmux_agent_enabled"/>
+                        </setting>
+                        <setting string="Max reasoning turns per loop"
+                                 help="Hard budget: exceeding it terminates the
+                                       loop safely (the operator is told).
+                                       Tightening this ends over-budget
+                                       IN-PROGRESS loops on their next turn.
+                                       Empty = default (6).">
+                            <field name="mmux_agent_max_turns"/>
+                        </setting>
+                        <setting string="Max capability proposals per loop"
+                                 help="A loop proposing this many writes is
+                                       almost certainly stuck; the loop stops.
+                                       Empty = default (3).">
+                            <field name="mmux_agent_max_capability_calls"/>
+                        </setting>
+                        <setting string="Max identical-step repeats"
+                                 help="How many times the identical step may
+                                       repeat before the loop is declared stuck.
+                                       Empty = default (2).">
+                            <field name="mmux_agent_max_repeated_step"/>
+                        </setting>
+                    </block>
+                </app>
+                <footer>
+                    <button string="Save" class="btn-primary" type="object"
+                            name="execute" special="save"/>
+                    <button string="Discard" class="btn-secondary"
+                            special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+</odoo>

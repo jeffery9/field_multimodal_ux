@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates id="template" xml:space="preserve">
+
+<t t-name="mmux_core.Workspace">
+  <div class="o_mmux_workspace container-fluid p-3">
+    <div class="row">
+      <div class="col-lg-4">
+        <div class="card">
+          <div class="card-header fw-bold">现场任务</div>
+          <div class="card-body">
+            <select class="form-select mb-2" t-on-change="selectScenario">
+              <t t-foreach="state.scenarios" t-as="s" t-key="s.id">
+                <option t-att-value="s.code" t-att-selected="s.code === state.activeScenario ? 'selected' : null">
+                  <t t-out="s.name"/>
+                </option>
+              </t>
+            </select>
+            <t t-if="activeScenarioRecord">
+              <p class="small text-muted" t-out="activeScenarioRecord.description"/>
+              <div class="small">默认交互：<t t-out="activeScenarioRecord.default_input"/></div>
+            </t>
+          </div>
+        </div>
+      </div>
+      <div class="col-lg-8">
+        <div class="card">
+          <div class="card-header d-flex gap-2 align-items-center">
+            <button class="btn btn-sm"
+                    t-att-class="state.tab === 'loop' ? 'btn-primary' : 'btn-outline-primary'"
+                    t-on-click="() => setTab('loop')">任务循环</button>
+            <button class="btn btn-sm"
+                    t-att-class="state.tab === 'panel' ? 'btn-primary' : 'btn-outline-primary'"
+                    t-on-click="() => setTab('panel')">多模态输入</button>
+          </div>
+          <div class="card-body">
+            <t t-if="state.tab === 'loop'">
+              <MmuxTaskLoop/>
+            </t>
+            <t t-else="">
+              <MmuxPanel scenario="state.activeScenario"/>
+            </t>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</t>
+
+</templates>

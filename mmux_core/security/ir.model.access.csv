@@ -1,0 +1,9 @@
+﻿id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_mmux_interaction_log_user,mmux.interaction.log.user,model_mmux_interaction_log,group_mmux_user,1,0,0,0
+access_mmux_interaction_log_admin,mmux.interaction.log.admin,model_mmux_interaction_log,group_mmux_manager,1,1,1,1
+access_mmux_scenario_config_user,mmux.scenario.config.user,model_mmux_scenario_config,group_mmux_user,1,0,0,0
+access_mmux_scenario_config_admin,mmux.scenario.config.admin,model_mmux_scenario_config,group_mmux_manager,1,1,1,1
+access_mmux_capability_view_admin,mmux.capability.view.admin,model_mmux_capability_view,group_mmux_manager,1,0,0,0
+access_mmux_capability_toggle_admin,mmux.capability.toggle.admin,model_mmux_capability_toggle,group_mmux_manager,1,1,1,1
+access_mmux_flow_override_user,mmux.flow.override.user,model_mmux_flow_override,group_mmux_user,1,0,0,0
+access_mmux_flow_override_admin,mmux.flow.override.admin,model_mmux_flow_override,group_mmux_manager,1,1,1,1

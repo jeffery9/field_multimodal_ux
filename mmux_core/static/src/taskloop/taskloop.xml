@@ -1,0 +1,192 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates id="template" xml:space="preserve">
+
+<t t-name="mmux_core.TaskLoop">
+  <div class="o_mmux_taskloop d-flex flex-column gap-2 p-2">
+
+    <!-- loop header: scenario + fetch -->
+    <div class="d-flex gap-2 align-items-center">
+      <input type="text" class="form-control form-control-sm"
+             placeholder="场景代码（可留空）"
+             t-att-value="state.scenario"
+             t-on-input="ev => state.scenario = ev.target.value"
+             t-on-keydown="ev => ev.key === 'Enter' &amp;&amp; fetchNext()"/>
+      <button class="btn btn-primary btn-sm" t-on-click="fetchNext"
+              disabled="state.busy">
+        <i class="fa fa-refresh"/> 获取任务
+      </button>
+      <button class="btn btn-outline-secondary btn-sm" t-on-click="resumeLoop"
+              disabled="state.busy or !state.loopKey">刷新</button>
+      <!-- hands-free: the whole loop (取任务/汇报/确认/求助) by voice -->
+      <button class="btn btn-sm" t-att-class="state.handsFree ? 'btn-success' : 'btn-outline-primary'"
+              t-on-click="toggleHandsFree">
+        <t t-if="state.handsFree"><i class="fa fa-assistive-listening-systems"/> 免手中</t>
+        <t t-else=""><i class="fa fa-hand-paper-o"/> 免手</t>
+      </button>
+      <span t-if="state.loopLabel" class="badge bg-secondary"
+            t-out="state.loopLabel"/>
+      <span t-if="state.loop" class="badge bg-light text-dark">
+        本轮已完成 <t t-out="state.loop.done_count"/>
+      </span>
+    </div>
+
+    <!-- hands-free status + last utterance, readable at a glance -->
+    <t t-if="state.handsFree">
+      <div class="o_mmux_loop alert alert-info py-1 px-2 small mb-0">
+        <span class="badge bg-secondary" t-out="state.loopState"/>
+        <span class="ms-1" t-out="state.voiceNotice || '说「你好助手」开始'"/>
+      </div>
+      <div t-if="state.lastSpoken" class="o_mmux_spoken small text-muted">
+        <i class="fa fa-volume-up"/> <t t-out="state.lastSpoken"/>
+      </div>
+    </t>
+
+    <!-- no pending task: the loop ended normally -->
+    <div t-if="isFinishedAll and !state.task" class="alert alert-success">
+      <i class="fa fa-check-circle"/> 当前没有待办任务，任务循环已结束。
+    </div>
+
+    <!-- agent decision bar: WHY this task, and was it autonomous? -->
+    <div t-if="state.agent and state.agent.task_id and state.task"
+         class="o_mmux_agent_bar alert py-2 px-3 mb-0"
+         t-att-class="agentWasAutonomous ? 'alert-primary' : 'alert-light border'">
+      <div class="d-flex align-items-start gap-2">
+        <i class="fa fa-robot mt-1"/>
+        <div class="flex-grow-1">
+          <div class="d-flex align-items-center gap-2 flex-wrap">
+            <span class="fw-bold">智能体建议</span>
+            <!-- transparency: never let a degraded pick masquerade as a
+                 considered decision -->
+            <span t-if="agentWasAutonomous" class="badge bg-primary">智能体自主判断</span>
+            <span t-else="" class="badge bg-secondary">队列兜底</span>
+            <span t-if="agentWasAutonomous and state.agent.confidence"
+                  class="badge bg-light text-dark">
+              置信度 <t t-out="agentConfidencePct"/>%
+            </span>
+          </div>
+          <div t-if="state.agent.reason" class="small mt-1"
+               t-out="state.agent.reason"/>
+          <div t-else="" class="small mt-1 text-muted">
+            系统未提供说明，已按优先级队列发布任务。
+          </div>
+        </div>
+      </div>
+
+      <!-- rejected alternatives: why they were NOT chosen -->
+      <div t-if="agentAlternatives.length" class="mt-2">
+        <button class="btn btn-link btn-sm p-0 text-decoration-none"
+                t-on-click="toggleAlternatives">
+          <i t-att-class="state.showAlternatives ? 'fa fa-caret-down' : 'fa fa-caret-right'"/>
+          其他候选（<t t-out="agentAlternatives.length"/>）
+        </button>
+        <ul t-if="state.showAlternatives" class="small mb-0 mt-1 ps-3">
+          <li t-foreach="agentAlternatives" t-as="alt" t-key="alt.task_id">
+            <code t-out="alt.task_id"/>
+            <span t-if="alt.why_not"> — <t t-out="alt.why_not"/></span>
+          </li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- current task card -->
+    <div t-if="state.task" class="o_mmux_task card">
+      <div class="card-body">
+        <div class="fw-bold">
+          <i class="fa fa-tasks"/> <t t-out="state.task.title"/>
+          <span class="badge bg-info text-dark" t-out="state.task.source_id"/>
+        </div>
+        <div class="small text-muted">
+          <t t-out="state.task.res_model"/> #<t t-out="state.task.res_id"/>
+          · 完成后动作：<t t-out="state.task.complete_capability"/>
+        </div>
+
+        <!-- actions -->
+        <div class="d-flex gap-2 mt-2 flex-wrap align-items-center">
+          <!-- who drives the guidance. A pure-agent architecture still
+               keeps the scripted engine reachable, because that engine is
+               also the agent's own fallback when no model is online. -->
+          <div class="btn-group btn-group-sm" role="group">
+            <button class="btn"
+                    t-att-class="guideIsAgent ? 'btn-primary' : 'btn-outline-primary'"
+                    t-on-click="() => setGuideMode('agent')">智能体引导</button>
+            <button class="btn"
+                    t-att-class="!guideIsAgent ? 'btn-primary' : 'btn-outline-primary'"
+                    t-on-click="() => setGuideMode('scripted')">脚本引导</button>
+          </div>
+          <button class="btn btn-outline-primary btn-sm" t-on-click="startGuide"
+                  disabled="state.busy">
+            <i class="fa fa-headphones"/> 开始引导
+          </button>
+          <button class="btn btn-outline-secondary btn-sm" t-on-click="closeGuide"
+                  t-if="state.showGuide">收起引导</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- agent loop bound to this task: the v3.0 driver.
+         It is the SAME funnel as manual execution — the agent may decide,
+         but a human still confirms every L2 write. -->
+    <MmuxAgentTrace t-if="state.task and state.loopKey and guideIsAgent"
+                    loopKey="state.loopKey" autostart="true" collapsible="true"/>
+
+    <!-- embedded guided flow, bound to the current task -->
+    <div t-if="state.showGuide and state.guide" class="o_mmux_taskloop_guide">
+      <MmuxGuide/>
+    </div>
+
+    <!-- report completion -->
+    <div t-if="state.task" class="card">
+      <div class="card-header fw-bold">汇报完成</div>
+      <div class="card-body">
+        <div class="small text-muted mb-1">
+          可用中文、English 或中英混杂描述完成情况，系统会统一语义后执行。
+        </div>
+        <textarea class="form-control form-control-sm" rows="2"
+                  placeholder="例如：已清点完毕 / quantity verified, all good"
+                  t-att-value="state.report"
+                  t-on-input="ev => state.report = ev.target.value"/>
+
+        <!-- L2 confirmation round-trip -->
+        <div t-if="state.confirmation" class="alert alert-warning mt-2">
+          <div class="fw-bold">
+            确认操作（<t t-out="state.confirmation.risk"/>）
+          </div>
+          <div><t t-out="state.confirmation.action"/> —
+            <t t-out="state.confirmation.impact"/></div>
+          <button class="btn btn-danger btn-sm mt-2" t-on-click="confirmReport"
+                  disabled="state.busy">确认执行</button>
+          <button class="btn btn-secondary btn-sm mt-2"
+                  t-on-click="cancelConfirmation">取消</button>
+        </div>
+        <button t-else="" class="btn btn-success btn-sm mt-2"
+                t-on-click="() => submitReport(false)" disabled="state.busy">
+          <i class="fa fa-paper-plane"/> 汇报完成，发布下一个任务
+        </button>
+      </div>
+    </div>
+
+    <!-- ask for help mid-task -->
+    <div t-if="state.task" class="card">
+      <div class="card-header fw-bold">向系统求助</div>
+      <div class="card-body">
+        <div class="d-flex gap-2">
+          <input type="text" class="form-control form-control-sm"
+                 placeholder="例如：这个库位在哪 / how many should I enter?"
+                 t-att-value="state.question"
+                 t-on-input="ev => state.question = ev.target.value"
+                 t-on-keydown="ev => ev.key === 'Enter' &amp;&amp; askHelp()"/>
+          <button class="btn btn-outline-primary btn-sm" t-on-click="askHelp"
+                  disabled="state.busy">提问</button>
+        </div>
+        <div t-if="state.hint" class="mt-2"
+             t-att-class="state.hintKind === 'error' ? 'alert alert-danger py-1 px-2 small mb-0'
+                          : 'alert alert-info py-1 px-2 small mb-0'">
+          <i class="fa fa-info-circle"/> <t t-out="state.hint"/>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</t>
+
+</templates>

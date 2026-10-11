@@ -1,0 +1,288 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates id="template" xml:space="preserve">
+
+<t t-name="mmux_core.AgentTrace">
+  <div class="o_mmux_agent_trace d-flex flex-column gap-2 p-2">
+
+    <!-- hands-free toggle, always available so the worker can arm voice
+         before the agent ever asks anything -->
+    <div class="d-flex gap-2 align-items-center">
+      <button class="btn btn-sm" t-att-class="state.handsFree ? 'btn-success' : 'btn-outline-primary'"
+              t-on-click="toggleHandsFree">
+        <t t-if="state.handsFree"><i class="fa fa-assistive-listening-systems"/> 免手中</t>
+        <t t-else=""><i class="fa fa-hand-paper-o"/> 免手</t>
+      </button>
+      <t t-if="state.handsFree">
+        <span class="badge bg-secondary" t-out="state.loopState"/>
+        <span class="small" t-out="state.voiceNotice || '说「你好助手」开始'"/>
+      </t>
+    </div>
+    <div t-if="state.handsFree and state.lastSpoken" class="o_mmux_spoken small text-muted">
+      <i class="fa fa-volume-up"/> <t t-out="state.lastSpoken"/>
+    </div>
+
+    <!-- idle: nothing started yet -->
+    <div t-if="!view" class="d-flex gap-2 align-items-center">
+      <button class="btn btn-primary btn-sm" t-on-click="start" disabled="state.busy">
+        <i class="fa fa-play"/> 启动智能体
+      </button>
+      <span class="small text-muted">
+        由服务端决定下一步；每一步都经过同一套执行守卫。
+      </span>
+    </div>
+
+    <!-- agent disabled by configuration: degrade, never dead-end -->
+    <div t-if="agentDisabled" class="alert alert-warning py-2 px-3 mb-0 small">
+      <i class="fa fa-info-circle"/>
+      智能体循环已在系统配置中关闭（<code>mmux.agent.enabled</code>），
+      将使用脚本化引导流程。
+    </div>
+
+    <t t-if="view">
+      <!-- ============ header: where we are, who is driving ============ -->
+      <div class="card">
+        <div class="card-body py-2">
+          <div class="d-flex align-items-center gap-2 flex-wrap">
+            <span class="fw-bold"><i class="fa fa-robot"/> 智能体循环</span>
+            <span class="badge" t-att-class="isStopped ? 'bg-danger'
+                                              : (isParked ? 'bg-warning text-dark' : 'bg-success')"
+                  t-out="stateLabel"/>
+            <!-- transparency: a degraded step must never look autonomous -->
+            <span class="badge" t-att-class="isDegraded ? 'bg-secondary' : 'bg-primary'"
+                  t-out="sourceLabel"/>
+            <span t-if="view.scenario" class="badge bg-light text-dark"
+                  t-out="view.scenario"/>
+          </div>
+
+          <!-- the task this loop is working on (when adopted from the loop) -->
+          <div t-if="view.task" class="small text-muted mt-1">
+            <i class="fa fa-tasks"/> <t t-out="view.task.title"/>
+            <span t-if="view.task.res_model">
+              · <t t-out="view.task.res_model"/> #<t t-out="view.task.res_id"/>
+            </span>
+            <span t-if="taskCompleted" class="badge bg-success ms-1">任务已标记完成</span>
+          </div>
+          <div t-else="" class="small text-muted mt-1">
+            目标：<t t-out="view.turn and view.turn.observation and view.turn.observation.goal"/>
+          </div>
+
+          <!-- ===== scenario context: WHERE the operator is working =====
+               Absent entirely for a client that reports no position — the
+               feature is then "not applicable", and an empty bar would be
+               noise pretending to be information. -->
+          <div t-if="scenarioContext" class="small mt-1 d-flex gap-2 align-items-center flex-wrap">
+            <span class="badge"
+                  t-att-class="scenarioContext.needs_asking ? 'bg-warning text-dark' : 'bg-info text-dark'">
+              <i class="fa fa-map-marker"/>
+              <t t-out="scenarioSourceLabel(scenarioContext.source)"/>
+            </span>
+            <!-- "recorded but not used": the operator must be able to see
+                 that their position was seen AND deliberately ignored -->
+            <span t-if="scenarioContext.geo_recorded" class="text-muted">
+              <i class="fa fa-crosshairs"/> 位置已记录（本期不参与判定）
+            </span>
+          </div>
+
+          <!-- stated vs observed disagree: say so BEFORE the operator is
+               told to do the wrong thing -->
+          <div t-if="scenarioContext and scenarioContext.position_mismatch"
+               class="alert alert-warning py-2 px-3 mb-0 mt-1 small">
+            <i class="fa fa-exclamation-triangle"/>
+            当前位置看起来像
+            <b t-out="candidateLabel(scenarioContext.position_scenario)"/>，
+            但本次作业按
+            <b t-out="candidateLabel(scenarioContext.stated_scenario)"/> 进行。
+            如与实际情况不符，请重新选择场景。
+          </div>
+
+          <!-- the reasoning behind the derivation, for the curious operator
+               and for whoever has to explain the decision later -->
+          <div t-if="scenarioContext and scenarioContext.evidence and scenarioContext.evidence.length"
+               class="small text-muted mt-1">
+            <i class="fa fa-search"/> 依据：
+            <t t-foreach="scenarioContext.evidence" t-as="ev" t-key="ev_index">
+              <span t-if="ev_index" class="text-muted">· </span>
+              <code t-out="ev.detail or ev.scenario"/>
+            </t>
+          </div>
+
+          <!-- budget: server-enforced, shown so a stop is never a surprise -->
+          <div t-if="budget" class="small text-muted mt-1 d-flex gap-3 flex-wrap">
+            <span>轮次 <t t-out="budget.turns_used"/>/<t t-out="budget.turns_used + budget.turns_left"/></span>
+            <span>能力调用 <t t-out="budget.capability_calls"/>/<t t-out="budget.capability_calls + budget.capability_calls_left"/></span>
+            <span t-if="progress">步骤 <t t-out="progress.done_ids.length"/>/<t t-out="progress.step_count"/></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ the decision itself ============================= -->
+      <div t-if="action" class="card o_mmux_agent_decision">
+        <div class="card-header py-1 d-flex align-items-center gap-2">
+          <span class="fw-bold small">本步决策</span>
+          <span class="badge bg-dark" t-out="actionLabel(turn)"/>
+        </div>
+        <div class="card-body py-2">
+          <!-- the model's own justification, when it gave one -->
+          <div t-if="action.payload.why" class="small">
+            <i class="fa fa-comment-o"/> <t t-out="action.payload.why"/>
+          </div>
+
+          <!-- call_capability: what it wants to write, and to which record -->
+          <div t-if="action.action === 'call_capability'" class="small mt-1">
+            <code t-out="action.payload.capability_id"/>
+            <span t-if="action.payload.record_id !== null and action.payload.record_id !== undefined">
+              → #<t t-out="action.payload.record_id"/>
+            </span>
+            <div t-if="action.payload.params" class="text-muted">
+              参数：<code t-out="JSON.stringify(action.payload.params)"/>
+            </div>
+          </div>
+
+          <!-- propose_step: narration only, business state untouched -->
+          <div t-if="action.action === 'propose_step'" class="small mt-1">
+            <div class="fw-bold" t-out="action.payload.title || action.payload.step_id"/>
+            <div t-if="action.payload.voice_prompt" class="text-muted"
+                 t-out="action.payload.voice_prompt"/>
+            <div t-if="action.payload.hint" class="alert alert-info py-1 px-2 small mt-1 mb-0"
+                 t-out="action.payload.hint"/>
+          </div>
+
+          <!-- ask_user -->
+          <div t-if="action.action === 'ask_user'" class="small mt-1">
+            <t t-out="action.payload.question"/>
+            <span t-if="action.payload.field" class="text-muted">
+              （字段 <code t-out="action.payload.field"/>）
+            </span>
+          </div>
+
+          <!-- finish -->
+          <div t-if="action.action === 'finish'" class="small mt-1"
+               t-out="action.payload.summary"/>
+        </div>
+      </div>
+
+      <!-- narration of the current step (also the TTS text) -->
+      <div t-if="speakText and !isAwaitingConfirmation" class="alert alert-info py-2 px-3 mb-0">
+        <i class="fa fa-volume-up"/> <t t-out="speakText"/>
+      </div>
+
+      <!-- ============ rejected model answer =========================== -->
+      <div t-if="rejectedReason" class="alert alert-secondary py-2 px-3 mb-0 small">
+        <i class="fa fa-filter"/>
+        本步模型答复未通过校验，已改用确定性流程：
+        <code t-out="rejectedReason"/>
+      </div>
+
+      <!-- ============ action bar: the ONLY place the loop moves ====== -->
+      <div class="d-flex gap-2 flex-wrap">
+
+        <!-- a. the human gate — shown only when the guard parked a write -->
+        <t t-if="isAwaitingConfirmation">
+          <div class="alert alert-warning flex-grow-1 mb-0">
+            <div class="fw-bold">
+              需要人工确认（<t t-out="(execConfirmation and execConfirmation.risk) || 'L2'"/>）
+            </div>
+            <div t-if="execConfirmation" class="small">
+              <span t-out="execConfirmation.action"/> —
+              <span t-out="execConfirmation.impact"/>
+            </div>
+            <div t-else="" class="small">
+              待确认操作：<code t-out="pendingCapability"/>
+            </div>
+            <div class="small text-muted mt-1">
+              确认只会放行服务端已暂存的这一笔操作，不会改变智能体的判断。
+            </div>
+            <button class="btn btn-danger btn-sm mt-2" t-on-click="confirm"
+                    disabled="state.busy">确认执行</button>
+          </div>
+        </t>
+
+        <!-- b. the agent asked a question: answer it, do not "continue" -->
+        <t t-elif="isAwaitingUser">
+          <div class="card flex-grow-1">
+            <div class="card-body py-2">
+              <div class="small fw-bold" t-out="pendingQuestion || speakText"/>
+
+              <!-- the server's options, as buttons. These are the ONLY
+                   valid answers for a scenario question: the reply is
+                   validated against this exact set server-side, because
+                   an accepted free-text scenario would let the client
+                   choose its own capability whitelist by typing. -->
+              <div t-if="pendingOptions and pendingOptions.length"
+                   class="d-flex gap-2 flex-wrap mt-2">
+                <button t-foreach="pendingOptions" t-as="opt" t-key="opt.value"
+                        class="btn btn-outline-primary btn-sm"
+                        t-on-click="() => submitOption(opt.value)"
+                        disabled="state.busy">
+                  <t t-out="opt.label"/>
+                </button>
+              </div>
+
+              <div class="d-flex gap-2 mt-2">
+                <input type="text" class="form-control form-control-sm"
+                       t-att-placeholder="pendingField ? ('请输入 ' + pendingField) : '请输入内容'"
+                       t-att-value="state.askAnswer"
+                       t-on-input="ev => state.askAnswer = ev.target.value"
+                       t-on-keydown="ev => ev.key === 'Enter' &amp;&amp; submitAnswer()"/>
+                <button class="btn btn-primary btn-sm" t-on-click="submitAnswer"
+                        disabled="state.busy">提交</button>
+              </div>
+            </div>
+          </div>
+        </t>
+
+        <!-- c. the loop is still working: the operator may nudge it on -->
+        <t t-elif="!isParked">
+          <button class="btn btn-outline-primary btn-sm" t-on-click="step"
+                  disabled="state.busy">
+            <i class="fa fa-step-forward"/> 下一步
+          </button>
+        </t>
+
+        <!-- d. terminal: restart is a fresh gesture, with the same key -->
+        <t t-else="">
+          <button t-if="isStopped" class="btn btn-outline-secondary btn-sm"
+                  t-on-click="retry" disabled="state.busy">
+            <i class="fa fa-repeat"/> 继续
+          </button>
+          <button class="btn btn-outline-secondary btn-sm" t-on-click="start"
+                  disabled="state.busy">
+            <i class="fa fa-refresh"/> 重新开始
+          </button>
+        </t>
+      </div>
+
+      <!-- ============ the trace ====================================== -->
+      <div t-if="showsTraceToggle" class="small">
+        <button class="btn btn-link btn-sm p-0 text-decoration-none"
+                t-on-click="() => state.showTrace = !state.showTrace">
+          <i t-att-class="state.showTrace ? 'fa fa-caret-down' : 'fa fa-caret-right'"/>
+          决策轨迹（<t t-out="traceRows.length"/>）
+        </button>
+      </div>
+
+      <div t-if="state.showTrace and traceRows.length" class="o_mmux_agent_log small">
+        <t t-foreach="traceRows" t-as="row" t-key="row_index">
+          <div class="d-flex gap-2 border-bottom py-1"
+               t-att-class="row.state === 'awaiting_confirmation' ? 'text-warning'
+                            : (row.state === 'failed' ? 'text-danger'
+                            : (row.source === 'llm' ? '' : 'text-muted'))">
+            <span class="text-muted" t-out="row_index + 1"/>
+            <span class="fw-bold" t-out="actionLabel(row)"/>
+            <span class="flex-grow-1" t-out="rowSummary(row)"/>
+            <span t-if="row.source !== 'llm'" class="badge bg-secondary"
+                  t-out="sourceLabelFor(row.source)"/>
+            <span t-if="execLabel(row)" class="badge bg-light text-dark"
+                  t-out="execLabel(row)"/>
+          </div>
+          <div t-if="rowWhy(row)" class="text-muted ps-4 pb-1"
+               t-out="rowWhy(row)"/>
+          <div t-if="row.rejected_reason" class="text-danger ps-4 pb-1"
+               t-out="row.rejected_reason"/>
+        </t>
+      </div>
+    </t>
+  </div>
+</t>
+
+</templates>

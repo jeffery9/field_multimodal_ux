@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Flow overrides: a DB row with the same flow_id replaces the
+         code-registered flow for NEW sessions. Authoring is
+         manager-only; every worker can read (executing an override is
+         just following steps, guarded as always). -->
+    <record id="action_mmux_flow_override" model="ir.actions.act_window">
+        <field name="name">Flow Overrides</field>
+        <field name="res_model">mmux.flow.override</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+    <menuitem id="menu_mmux_flow_overrides" name="Flow Overrides"
+              parent="menu_mmux_config"
+              action="action_mmux_flow_override" sequence="20"/>
+
+    <record id="view_mmux_flow_override_tree" model="ir.ui.view">
+        <field name="name">mmux.flow.override.tree</field>
+        <field name="model">mmux.flow.override</field>
+        <field name="arch" type="xml">
+            <!-- steps (Json) deliberately not rendered in tree -->
+            <tree>
+                <field name="flow_id"/>
+                <field name="name"/>
+                <field name="voice_on"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mmux_flow_override_form" model="ir.ui.view">
+        <field name="name">mmux.flow.override.form</field>
+        <field name="model">mmux.flow.override</field>
+        <field name="arch" type="xml">
+            <form>
+                <sheet>
+                    <group>
+                        <field name="flow_id"
+                               help="The code-registered flow this row replaces. Delete the row and the code flow is back."/>
+                        <field name="name"/>
+                        <field name="description"/>
+                        <field name="voice_on"/>
+                    </group>
+                    <group string="Steps"
+                           help="JSON list of step objects. Text fields accept plain text or {lang: text}. A step naming a capability_id still goes through the same ExecutionGuard — an override changes what the operator is asked to do, never what the system may do.">
+                        <field name="steps" widget="text"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+</odoo>

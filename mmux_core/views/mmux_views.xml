@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Configuration menu -->
+    <record id="action_mmux_scenario_config" model="ir.actions.act_window">
+        <field name="name">Scenario Configuration</field>
+        <field name="res_model">mmux.scenario.config</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+    <record id="action_mmux_interaction_log" model="ir.actions.act_window">
+        <field name="name">Interaction Audit Log</field>
+        <field name="res_model">mmux.interaction.log</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+    <record id="action_mmux_workspace" model="ir.actions.client">
+        <field name="name">Field Workspace</field>
+        <field name="tag">mmux_workspace</field>
+    </record>
+
+    <menuitem id="menu_mmux_root" name="Field Assistant" sequence="60"/>
+    <menuitem id="menu_mmux_workspace" name="Field Workspace" parent="menu_mmux_root"
+              action="action_mmux_workspace" sequence="10"/>
+    <menuitem id="menu_mmux_config" name="Configuration" parent="menu_mmux_root" sequence="90"/>
+    <menuitem id="menu_mmux_settings" name="Settings" parent="menu_mmux_config"
+              action="action_mmux_settings" sequence="5"/>
+    <menuitem id="menu_mmux_scenarios" name="Scenarios" parent="menu_mmux_config"
+              action="action_mmux_scenario_config"/>
+    <menuitem id="menu_mmux_logs" name="Interaction Log" parent="menu_mmux_config"
+              action="action_mmux_interaction_log"/>
+
+    <!-- Scenario config views -->
+    <record id="view_mmux_scenario_tree" model="ir.ui.view">
+        <field name="name">mmux.scenario.config.tree</field>
+        <field name="model">mmux.scenario.config</field>
+        <field name="arch" type="xml">
+            <tree>
+                <field name="name"/>
+                <field name="code"/>
+                <field name="default_input"/>
+                <field name="geo_collect" optional="hide"/>
+                <field name="geo_weight" optional="hide"/>
+                <field name="active"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mmux_scenario_form" model="ir.ui.view">
+        <field name="name">mmux.scenario.config.form</field>
+        <field name="model">mmux.scenario.config</field>
+        <field name="arch" type="xml">
+            <form>
+                <sheet>
+                    <group>
+                        <field name="name"/>
+                        <field name="code"/>
+                        <field name="default_input"/>
+                        <field name="active"/>
+                    </group>
+                    <group string="Registered capabilities (code-defined whitelist)">
+                        <field name="capability_ids_text" readonly="1"/>
+                    </group>
+                    <group string="Device position (v3.1)"
+                           help="How the browser's position is collected, and whether it is allowed to influence the scenario. Collecting is off by default — a position is personal data, and the assistant works fine without it.">
+                        <field name="geo_collect"/>
+                        <field name="geo_weight"/>
+                        <field name="geo_radius_m"
+                               attrs="{'invisible': [('geo_collect', '=', False)]}"/>
+                    </group>
+                    <group string="Description">
+                        <field name="description"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- Log views -->
+    <record id="view_mmux_log_tree" model="ir.ui.view">
+        <field name="name">mmux.interaction.log.tree</field>
+        <field name="model">mmux.interaction.log</field>
+        <field name="arch" type="xml">
+            <tree>
+                <field name="create_date"/>
+                <field name="user_id"/>
+                <field name="input_type"/>
+                <field name="capability_id_name"/>
+                <field name="exec_status"/>
+                <field name="duration_ms"/>
+            </tree>
+        </field>
+    </record>
+</odoo>

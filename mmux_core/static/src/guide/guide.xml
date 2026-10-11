@@ -1,0 +1,206 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates id="template" xml:space="preserve">
+
+<t t-name="mmux_core.Guide">
+  <div class="o_mmux_guide d-flex flex-column gap-2 p-2">
+
+    <!-- flow picker -->
+    <div t-if="!state.guide" class="d-flex flex-column gap-2">
+      <div class="btn-group btn-group-sm w-100" role="group">
+        <button class="btn" t-att-class="isNovice ? 'btn-primary' : 'btn-outline-primary'"
+                t-on-click="() => setSkill('novice')">新手模式</button>
+        <button class="btn" t-att-class="!isNovice ? 'btn-primary' : 'btn-outline-primary'"
+                t-on-click="() => setSkill('expert')">熟手模式</button>
+      </div>
+      <div class="small text-muted">
+        <t t-if="isNovice">新手模式：步骤更细，逐步讲解与复核，带操作提示。</t>
+        <t t-else="">熟手模式：合并步骤，语音精简，节奏更快。</t>
+      </div>
+      <div class="d-flex gap-2 align-items-center">
+        <select class="form-select" t-on-change="ev => state.flowId = ev.target.value">
+          <option value="">选择引导流程…</option>
+          <t t-foreach="state.flows" t-as="f" t-key="f.flow_id">
+            <option t-att-value="f.flow_id"><t t-out="f.name"/></option>
+          </t>
+        </select>
+        <button class="btn btn-primary btn-sm" t-on-click="startFlow"
+                disabled="state.busy or !state.flowId">开始</button>
+      </div>
+    </div>
+    <div t-if="state.guide" class="d-flex gap-2">
+      <button class="btn btn-outline-secondary btn-sm" t-on-click="resumeFlow"
+              disabled="state.busy">刷新</button>
+      <button class="btn btn-outline-secondary btn-sm" t-on-click="toggleVoice">
+        <t t-if="state.voice"><i class="fa fa-volume-up"/> 语音开</t>
+        <t t-else=""><i class="fa fa-volume-off"/> 语音关</t>
+      </button>
+      <!-- hands-free: the worker says the wake word, then answers each
+           step by voice; L2 steps are approved with "确认" -->
+      <button class="btn btn-sm" t-att-class="state.handsFree ? 'btn-success' : 'btn-outline-primary'"
+              t-on-click="toggleHandsFree">
+        <t t-if="state.handsFree"><i class="fa fa-assistive-listening-systems"/> 免手中</t>
+        <t t-else=""><i class="fa fa-hand-paper-o"/> 免手</t>
+      </button>
+      <button class="btn btn-outline-secondary btn-sm"
+              t-on-click="() => setSkill(isNovice ? 'expert' : 'novice')">
+        <t t-out="isNovice ? '新手' : '熟手'"/>
+      </button>
+      <button class="btn btn-outline-danger btn-sm" t-on-click="() => { tts.stop(); state.guide = null; }">退出</button>
+    </div>
+
+    <!-- hands-free status + what was just spoken, so the worker can
+         confirm the system heard them without looking closely -->
+    <t t-if="state.handsFree">
+      <div class="o_mmux_loop alert alert-info py-1 px-2 small mb-0">
+        <span class="badge bg-secondary" t-out="state.loopState"/>
+        <span class="ms-1" t-out="state.voiceNotice || '说「助手」开始'"/>
+      </div>
+      <div t-if="state.lastSpoken" class="o_mmux_spoken small text-muted">
+        <i class="fa fa-volume-up"/> <t t-out="state.lastSpoken"/>
+      </div>
+    </t>
+
+    <!-- current step -->
+    <t t-if="state.guide">
+      <t t-if="state.guide.finished">
+        <div class="alert alert-success"><i class="fa fa-check"/> 全部步骤完成</div>
+      </t>
+      <t t-else="">
+        <div class="o_mmux_guide_current card">
+          <div class="card-body">
+            <div class="fw-bold"><t t-out="state.guide.current.title"/>
+              <span class="badge bg-secondary">剩余 <t t-out="state.guide.remaining"/></span>
+              <span class="badge" t-att-class="isNovice ? 'bg-primary' : 'bg-dark'">
+                <t t-out="isNovice ? '新手' : '熟手'"/>
+              </span>
+            </div>
+            <div class="small text-muted" t-out="state.guide.current.voice_prompt"/>
+            <!-- novice extras: self-check hint + expected value -->
+            <t t-if="isNovice and state.guide.current.hint">
+              <div class="alert alert-info py-1 px-2 small mt-2 mb-1">
+                <i class="fa fa-info-circle"/> <t t-out="state.guide.current.hint"/>
+                <t t-if="state.guide.current.expected">
+                  <div>期望值：<b><t t-out="state.guide.current.expected"/></b></div>
+                </t>
+              </div>
+            </t>
+
+            <t t-if="state.guide.current.input_type === 'confirm'">
+              <button class="btn btn-primary btn-sm mt-2" t-on-click="confirmStep"
+                      disabled="state.busy">到达，下一步</button>
+              <t t-if="state.guide.current.skippable">
+                <button class="btn btn-outline-secondary btn-sm mt-2" t-on-click="skipStep">跳过</button>
+              </t>
+            </t>
+            <t t-elif="state.guide.current.input_type === 'scan'">
+              <div class="d-flex gap-2 mt-2">
+                <input type="text" class="form-control form-control-sm"
+                       placeholder="扫描商品条码"
+                       t-att-value="state.scanInput"
+                       t-on-input="ev => state.scanInput = ev.target.value"
+                       t-on-keydown="ev => ev.key === 'Enter' &amp;&amp; submitScan()"/>
+                <button class="btn btn-outline-primary btn-sm"
+                        t-on-click="() => openCapture('scan')"
+                        disabled="state.busy" title="用相机扫描条码">
+                  <i class="fa fa-barcode"/> 扫码
+                </button>
+                <button class="btn btn-primary btn-sm" t-on-click="submitScan" disabled="state.busy">确认</button>
+              </div>
+            </t>
+            <t t-elif="state.guide.current.input_type === 'voice_qty'">
+              <div class="d-flex gap-2 mt-2">
+                <input type="number" class="form-control form-control-sm"
+                       placeholder="口述/输入数量"
+                       t-att-value="state.qtyInput"
+                       t-on-input="ev => state.qtyInput = ev.target.value"
+                       t-on-keydown="ev => ev.key === 'Enter' &amp;&amp; submitQty()"/>
+                <button class="btn btn-outline-primary btn-sm"
+                        t-on-click="() => openCapture('ocr')"
+                        disabled="state.busy" title="拍下标签，识别数量" t-if="captureIntent">
+                  <i class="fa fa-camera"/> 拍照识别
+                </button>
+                <button class="btn btn-primary btn-sm" t-on-click="submitQty()" disabled="state.busy">确认数量</button>
+              </div>
+            </t>
+            <t t-elif="state.guide.current.input_type === 'capability'">
+              <t t-if="state.confirmation">
+                <div class="alert alert-warning mt-2">
+                  <div class="fw-bold">确认操作（<t t-out="state.confirmation.risk"/>）</div>
+                  <div t-out="state.confirmation.action"/> — <t t-out="state.confirmation.impact"/>
+                  <button class="btn btn-danger btn-sm mt-2" t-on-click="confirmCapabilityStep"
+                          disabled="state.busy">确认执行</button>
+                  <button class="btn btn-secondary btn-sm mt-2"
+                          t-on-click="state.confirmation = null">取消</button>
+                </div>
+              </t>
+              <t t-else="">
+                <button class="btn btn-warning btn-sm mt-2" t-on-click="_advance({confirmed: false}, false)"
+                        disabled="state.busy">执行此步骤</button>
+                <t t-if="state.guide.current.skippable">
+                  <button class="btn btn-outline-secondary btn-sm mt-2" t-on-click="skipStep">跳过</button>
+                </t>
+              </t>
+            </t>
+
+            <!-- device capture: a step that wants a photo gets one, and a
+                 step whose answer is a value can be read off the camera
+                 instead of typed.  Steps that are decisions show nothing
+                 here, because captureIntent is null for them. -->
+            <t t-if="captureIntent">
+              <div class="d-flex gap-2 flex-wrap mt-2">
+                <t t-if="captureIntent.purpose === 'evidence'">
+                  <button class="btn btn-outline-primary btn-sm"
+                          t-on-click="() => openCapture('evidence')" disabled="state.busy">
+                    <i class="fa fa-paperclip"/> 拍照留证
+                    <t t-if="state.photos.length">（<t t-out="state.photos.length"/>）</t>
+                  </button>
+                </t>
+                <t t-else="">
+                  <button class="btn btn-outline-primary btn-sm"
+                          t-on-click="() => openCapture('ocr')" disabled="state.busy">
+                    <i class="fa fa-camera"/> 拍照识别
+                  </button>
+                </t>
+              </div>
+            </t>
+
+            <t t-if="state.capture">
+              <MmuxCapture t-att-purpose="state.capture === 'scan' ? 'scan' : 'photo'"
+                           onBarcode="onCapturedBarcode"
+                           onCaptured="onCapturedPhoto"
+                           onClose="closeCapture"/>
+            </t>
+
+            <t t-if="state.captureNotice">
+              <div class="o_mmux_capture_notice small text-muted mt-1"
+                   t-out="state.captureNotice"/>
+            </t>
+
+            <t t-if="state.photos.length">
+              <div class="o_mmux_photos d-flex gap-1 flex-wrap mt-1">
+                <t t-foreach="state.photos" t-as="ph" t-key="ph_index">
+                  <span class="badge bg-secondary">
+                    <i class="fa fa-image"/> 照片 <t t-out="ph_index + 1"/>
+                    <button class="btn-close btn-close-white ms-1" style="font-size:.6rem"
+                            t-on-click="() => removePhoto(ph_index)"/>
+                  </span>
+                </t>
+              </div>
+            </t>
+          </div>
+        </div>
+        <!-- progress list -->
+        <div class="o_mmux_guide_steps small">
+          <t t-foreach="state.guide.steps" t-as="st" t-key="st.step_id">
+            <div t-att-class="st.done ? 'text-success' : (st.step_id === state.guide.current.step_id ? 'fw-bold' : 'text-muted')">
+              <t t-if="st.done"><i class="fa fa-check"/> </t>
+              <t t-out="st.title"/>
+            </div>
+          </t>
+        </div>
+      </t>
+    </t>
+  </div>
+</t>
+
+</templates>

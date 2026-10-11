@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo noupdate="1">
+    <record id="scenario_field_service" model="mmux.scenario.config">
+        <field name="code">field_service</field>
+        <field name="name">现场服务与售后</field>
+        <field name="default_input">camera</field>
+        <field name="description">安装维修：设备识别、维修取证、服务报告草稿、备件记录、完工确认。</field>
+        <field name="geo_collect" eval="False"/>
+        <field name="geo_weight">0</field>
+    </record>
+</odoo>

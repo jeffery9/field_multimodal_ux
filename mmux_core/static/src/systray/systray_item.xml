@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates id="template" xml:space="preserve">
+
+<t t-name="mmux_core.SystrayItem">
+  <div class="o_mmux_systray">
+    <button class="btn btn-link o-nav-link position-relative"
+            title="现场助手 (Field Assistant)" t-on-click="toggle">
+      <i class="fa fa-commenting-o"/>
+      <!-- the globally armed wake listener, visible so the worker can see
+           it is listening without opening anything -->
+      <t t-if="state.wakeArmed">
+        <i class="fa fa-assistive-listening-systems text-success position-absolute top-0 start-100 small"/>
+      </t>
+    </button>
+    <div t-if="state.open" class="o_mmux_popover shadow p-2 bg-white rounded position-absolute end-0 mt-1"
+         style="width: 340px; max-height: 70vh; overflow-y: auto; z-index: 1050;">
+      <ul class="nav nav-tabs mb-2">
+        <li class="nav-item">
+          <button class="nav-link" t-att-class="state.tab === 'assistant' ? 'active' : ''"
+                  t-on-click="setTab('assistant')">助手</button>
+        </li>
+        <li class="nav-item">
+          <button class="nav-link" t-att-class="state.tab === 'guide' ? 'active' : ''"
+                  t-on-click="setTab('guide')">语音引导</button>
+        </li>
+      </ul>
+      <!-- arm the session-wide wake listener: from then on the assistant
+           can be summoned by voice even while this panel is closed -->
+      <div class="d-flex gap-2 align-items-center mb-1">
+        <button class="btn btn-sm" t-att-class="state.wakeArmed ? 'btn-success' : 'btn-outline-primary'"
+                t-on-click="toggleWake">
+          <t t-if="state.wakeArmed"><i class="fa fa-assistive-listening-systems"/> 后台待命中</t>
+          <t t-else=""><i class="fa fa-hand-paper-o"/> 开启全局唤醒</t>
+        </button>
+        <span t-if="state.voiceNotice" class="small text-warning" t-out="state.voiceNotice"/>
+      </div>
+      <MmuxPanel t-if="state.tab === 'assistant'"/>
+      <MmuxGuide t-if="state.tab === 'guide'"/>
+      <hr/>
+      <button class="btn btn-outline-secondary btn-sm" t-on-click="openWorkspace">
+        打开现场工作区
+      </button>
+    </div>
+  </div>
+</t>
+
+</templates>

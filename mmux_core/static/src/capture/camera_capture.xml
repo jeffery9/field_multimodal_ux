@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates id="template" xml:space="preserve">
+
+<t t-name="mmux_core.Capture">
+  <div class="o_mmux_capture d-flex flex-column gap-2">
+
+    <!-- live preview; the hidden canvas is the shutter target and the
+         hidden input is the system-camera / camera-roll escape hatch -->
+    <div class="o_mmux_capture_view position-relative bg-dark rounded"
+         style="min-height: 180px; overflow: hidden;">
+      <video t-ref="video" class="w-100 h-100" playsinline="true"
+             muted="true" style="object-fit: cover; display: block;"/>
+      <canvas t-ref="canvas" class="d-none"/>
+      <t t-if="!state.ready">
+        <div class="o_mmux_capture_placeholder position-absolute top-50 start-50
+                    translate-middle text-white-50 small text-center">
+          <i class="fa fa-camera fa-2x d-block mb-1"/>
+          <t t-out="state.error || '正在打开相机…'"/>
+        </div>
+      </t>
+      <!-- the decoded value, shown so the worker can eyeball it -->
+      <t t-if="state.lastBarcode">
+        <div class="o_mmux_capture_hit position-absolute bottom-0 start-0 m-2
+                    badge bg-success">
+          <i class="fa fa-barcode"/> <t t-out="state.lastBarcode"/>
+        </div>
+      </t>
+    </div>
+
+    <div t-if="state.notice" class="small text-warning" t-out="state.notice"/>
+
+    <div class="d-flex gap-2 flex-wrap">
+      <button class="btn btn-primary btn-sm" t-on-click="snapshot"
+              disabled="!state.ready">
+        <i class="fa fa-camera"/> 拍照
+      </button>
+      <button class="btn btn-outline-secondary btn-sm" t-on-click="chooseFile">
+        <i class="fa fa-image"/> 相册
+      </button>
+      <button class="btn btn-outline-secondary btn-sm" t-on-click="close">
+        关闭
+      </button>
+    </div>
+
+    <!-- the system camera: the only path on iOS WebView / non-HTTPS -->
+    <input t-ref="file" type="file" accept="image/*" capture="environment"
+           class="d-none" t-on-change="onFilePicked"/>
+
+    <div class="small text-muted">
+      照片会上传用于识别，并作为记录附件留存。
+    </div>
+  </div>
+</t>
+
+</templates>

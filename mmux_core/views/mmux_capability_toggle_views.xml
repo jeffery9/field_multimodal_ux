@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Capability toggles: the ONE write surface over the code-defined
+         capability whitelist. Manager-only (ACL + model-level check);
+         every change is audited to the interaction log. -->
+    <record id="action_mmux_capability_toggle" model="ir.actions.act_window">
+        <field name="name">Capability Switches</field>
+        <field name="res_model">mmux.capability.toggle</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+    <menuitem id="menu_mmux_capability_toggles" name="Capability Switches"
+              parent="menu_mmux_config"
+              action="action_mmux_capability_toggle" sequence="15"/>
+
+    <record id="view_mmux_capability_toggle_tree" model="ir.ui.view">
+        <field name="name">mmux.capability.toggle.tree</field>
+        <field name="model">mmux.capability.toggle</field>
+        <field name="arch" type="xml">
+            <tree editable="bottom">
+                <field name="capability_id"/>
+                <field name="name" readonly="1"/>
+                <field name="risk" readonly="1"/>
+                <field name="require_confirmation" readonly="1"/>
+                <field name="scenario" readonly="1"/>
+                <field name="enabled" widget="boolean_toggle"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mmux_capability_toggle_form" model="ir.ui.view">
+        <field name="name">mmux.capability.toggle.form</field>
+        <field name="model">mmux.capability.toggle</field>
+        <field name="arch" type="xml">
+            <form>
+                <sheet>
+                    <group>
+                        <field name="capability_id"/>
+                        <field name="enabled"/>
+                    </group>
+                    <group string="From the code-defined whitelist (read-only)">
+                        <field name="name" readonly="1"/>
+                        <field name="risk" readonly="1"/>
+                        <field name="require_confirmation" readonly="1"/>
+                        <field name="scenario" readonly="1"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+</odoo>
