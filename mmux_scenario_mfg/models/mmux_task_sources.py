@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 jeffery9@gmail.com & geninit
+# License LGPL-3.0 or later (https://www.gnu.org/licenses/lgpl-3.0.html)
 """Manufacturing task source + completion capability for the task loop.
 
 Task source: a **mrp.workorder** still to be executed is one work item.

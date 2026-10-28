@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 jeffery9@gmail.com & geninit
+# License LGPL-3.0 or later (https://www.gnu.org/licenses/lgpl-3.0.html)
 """Photo evidence: the `photos` parameter must become real attachments.
 
 PRD §2.6 — a worker photographs the job, and the photo is the evidence.

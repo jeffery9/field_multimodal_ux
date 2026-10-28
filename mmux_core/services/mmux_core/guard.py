@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 jeffery9@gmail.com & geninit
+# License LGPL-3.0 or later (https://www.gnu.org/licenses/lgpl-3.0.html)
 """Execution guard: the server-side funnel every business action must pass.
 
 Implements PRD FR-016's ordered pipeline and FR-017's result state machine.

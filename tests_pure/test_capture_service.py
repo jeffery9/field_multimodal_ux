@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 jeffery9@gmail.com & geninit
+# License LGPL-3.0 or later (https://www.gnu.org/licenses/lgpl-3.0.html)
 """Pure-logic tests for the shared capture service's decision helpers.
 
 `capture_service.js` imports the Odoo RPC client, so `node` cannot load it

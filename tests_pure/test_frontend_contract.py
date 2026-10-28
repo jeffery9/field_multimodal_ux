@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 jeffery9@gmail.com & geninit
+# License LGPL-3.0 or later (https://www.gnu.org/licenses/lgpl-3.0.html)
 """Contract tests for the v3.0 frontend <-> server boundary.
 
 There is no browser in this test suite, and there should not be: what can

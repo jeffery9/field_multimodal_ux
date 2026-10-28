@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 jeffery9@gmail.com & geninit
+# License LGPL-3.0 or later (https://www.gnu.org/licenses/lgpl-3.0.html)
 """Field service & after-sales scenario capabilities (PRD §4.5 / §10.2).
 
 Community-native models only: project.task (service task), 

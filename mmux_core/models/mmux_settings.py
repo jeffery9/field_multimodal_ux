@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 jeffery9@gmail.com & geninit
+# License LGPL-3.0 or later (https://www.gnu.org/licenses/lgpl-3.0.html)
 """Provider & feature settings, surfaced as a form instead of raw parameters.
 
 Before this model existed, configuring the platform meant opening
