@@ -13,7 +13,8 @@
 | 要求 | 说明 |
 |---|---|
 | 模块结构 | `<module>/models/`、`views/`、`security/`、`data/`、`tests/`、`__manifest__.py` |
-| manifest 键序 | `name` → `summary` → `description` → `version` → `category` → `license` → `depends` → `data` → `assets` → `installable` |
+| manifest 键序 | `name` → `summary` → `description` → `version` → `category` → `author` → `maintainers` → `license` → `copyright` → `depends` → `data` → `assets` → `installable` |
+| 版权头（强制） | 每个 `.py` 文件前三行：`# -*- coding: utf-8 -*-`、`# Copyright (C) 2026 jeffery9@gmail.com & geninit`、`# License LGPL-3.0 or later (https://www.gnu.org/licenses/lgpl-3.0.html)`；每个 `.js` 资产文件首行块注释含同样的 Copyright/License 两行。manifest 的 `author` 统一为 `jeffery9@gmail.com & geninit`，并声明 `copyright` 键 |
 | 模型 | `_name` 用点分层（`mmux.service`）；**必须有 `_description`** |
 | 方法 | 私有方法前缀 `_`；模型方法用 snake_case |
 | 导入顺序 | 标准库 → 第三方 → `from odoo import ...` → 本地相对导入 |
@@ -178,6 +179,22 @@ v3.1.3 又踩到同一课，但换了两副面孔。
 
 两条规则都做过缺陷注入自测。
 
+### 版权申明必须机器可查（规则 14）
+
+本项目版权声明人为 **jeffery9@gmail.com & geninit**，许可证 **LGPL-3**
+（见根目录 `LICENSE`）。落地为三处，且由**规则 14**（`copyright headers
+present`）逐一核对：
+
+| 位置 | 要求 |
+|---|---|
+| 每个 `.py` 文件 | 前三行固定为 coding 声明、`# Copyright (C) 2026 jeffery9@gmail.com & geninit`、`# License LGPL-3.0 or later (...)` |
+| 每个 `.js` 资产文件 | 首部块注释含同样的 Copyright / License 两行 |
+| 每个 `__manifest__.py` | `author` 统一为版权人，并声明 `copyright` 键（规则 7 同步钉住键序与取值） |
+
+写这条规则的理由和前面所有规则同源：**手写的声明会在第一个新建文件时
+开始腐烂**。只写在 README 里的版权是意图，能被 linter 判 pass/fail 的
+版权才是事实。规则 14 已做缺陷注入自测（删掉某文件的头行 → 精确报错）。
+
 > 到这里，"交给解析器"这条原则已经覆盖了 Python、XML、manifest，
 > 现在补上 JS。判据很统一：**如果这个文件格式有权威解析器，
 > 就不要用正则去猜它是否合法。**
@@ -190,6 +207,7 @@ v3.1.3 又踩到同一课，但换了两副面孔。
 - [ ] 新增的抽象，删掉之后代码会不会**更简单**？会的话就删。
 - [ ] 新增的 `sudo()` 能不能说明理由？
 - [ ] manifest 键序、`_description`、导入顺序是否符合规范？
+- [ ] **新建的 `.py` / `.js` 文件有没有带版权头三行？**（跑规则 14；版权人 `jeffery9@gmail.com & geninit`，LGPL-3）
 - [ ] 有没有 `print()` 或裸 SQL？
 - [ ] **搬动方法时，它用到的模块 import 是否也跟着搬了？**（跑规则 10）
 - [ ] **模板里写条件/回调时，`&` 有没有写成 `&amp;`？**（跑规则 11）
