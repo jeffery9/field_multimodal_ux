@@ -443,7 +443,7 @@ sudo systemctl restart odoo    # 或等价的重启方式
 ```bash
 # 全部应当通过
 python3 -m pytest tests_pure -q                  # 540 passed
-python3 tools/check_standards.py                 # 13 rules, no problems
+python3 tools/check_standards.py                 # 14 rules, no problems
 python3 /tmp/verify_voice_hands_free.py          # 74/74
 python3 /tmp/verify_photo_evidence.py            # 9/9
 ```
@@ -524,7 +524,7 @@ odoo -d <db> --test-enable --stop-after-init \
 
 ```bash
 python3 -m pytest tests_pure -q                     # 540 passed, 1 skipped
-python3 tools/check_standards.py                    # 13 rules, no problems
+python3 tools/check_standards.py                    # 14 rules, no problems
 python3 /tmp/verify_caps_cache.py                   # 10/10
 python3 /tmp/verify_guide_cache.py                  # 20/20
 python3 /tmp/verify_wiring.py                       # INTEGRITY PROBLEMS: none
@@ -575,7 +575,7 @@ MMUX_PERF=1 python3 -m pytest tests_pure/test_flow_perf.py -q
 
 ```bash
 python3 -m pytest tests_pure -q                     # 546 passed, 1 skipped
-python3 tools/check_standards.py                    # 13 rules, no problems
+python3 tools/check_standards.py                    # 14 rules, no problems
 python3 /tmp/verify_config_layer.py                 # config layer: all green (34)
 python3 /tmp/verify_guide_cache.py                  # 20/20
 python3 /tmp/verify_mmux_settings.py                # 56/56
@@ -604,3 +604,51 @@ odoo -d <db> --test-enable --stop-after-init \
 0 预算会让 agent 完全不可用（每回合立即 `budget_exhausted`），必须报错
 拒绝而不是静默通过。`verify_config_layer.py` 的 D2 检查抓到，已修复为
 显式 `value is False or value is None` 判空并加固注释。
+
+## 15. 升级到 v3.5（任务会话与推理循环，19.0.7.0.0）
+
+本轮是**行为范式**变更：agent loop 的核心工作模式改为**推理**（目标 +
+世界状态 + 上一步结果 → 一个动作），不再由预制工作流 step 驱动；同时
+确立**会话即任务**——一个任务 = 一个对话 session，切换任务即新 session。
+设计细节见 [docs/CONFIG.md §14](CONFIG.md)，验收用例见
+[docs/ACCEPTANCE.md §10.10](ACCEPTANCE.md)。
+
+### 15.1 升级步骤
+
+```bash
+# 无新增模块、无权限变更；升级内核即可
+odoo -d <db> -u mmux_core --stop-after-init
+```
+
+- **无数据库迁移**。session 记忆仍复用交互日志（`agent:<loop_key>` 行）。
+- **进行中的旧循环**：升级后按新 observation 契约继续（recipe 变为参考
+  材料），不会中断；若希望严格按旧脚本走完，可让操作员完成当前任务再刷新。
+
+### 15.2 变了什么（对外可见）
+
+| 项 | v3.4 | v3.5 |
+|---|---|---|
+| 模型看到的推进依据 | `current_step`（脚本游标） | `goal + world_state + last_result + recipe_reference` |
+| `done_steps` | 混有内部签名 | 只含人类可读 `step_id`；能力效果改记 `recent_outcomes` |
+| `blob["history"]` | 恒空（每回合失忆） | 每回合追加模型动作，有界截断 |
+| 停滞检测 | 动作文本重复计数 | 连续 K 次无世界变化/无新信息才判停 |
+| 幂等键 | 固定 `{loop_key}:complete` 类 | `{loop_key}:agent:{turn}`（同回合重放仍拦截） |
+| session 终结后旧 key | —（无明确语义） | 一律 `unknown_loop` 拒绝，不复活上个任务 |
+
+响应键（`task/loop/loop_key/agent/observation` 等）**全部向后兼容**，
+仅语义更新；前端 `agent_trace.js` 无需改动。
+
+### 15.3 没变什么（刻意）
+
+- 动作集封闭、负载键封闭、L2 确认门、场景白名单、单请求单步执行；
+- LLM 不可用时逐 step 引导兜底（`LOOP_SOURCE_RECIPE`）；
+- 三个 Agent 预算配置项（§13.1）——作用域明确为单 session。
+
+### 15.4 升级后请确认
+
+1. 纯核回归：`python3 -m pytest tests_pure -q`（含改写后的
+   `test_agentloop_run.py`：recipe 参考化、账本净化、进展型停滞）。
+2. Odoo 侧：`test_mmux_taskloop_agent.py` 新增的 session 边界用例
+   （终结后拒 turn、新任务不继承记忆、per-turn 幂等）通过。
+3. 抽一个真实任务走完整闭环：取任务 → 推理若干轮 → 汇报完成 →
+   确认下一个任务的 agent 响应中看不到上一个任务的任何状态。

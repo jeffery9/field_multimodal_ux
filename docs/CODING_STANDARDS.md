@@ -125,7 +125,7 @@ Odoo 把它们合并成**同一个 model**。对外 API 一个都没变，控制
 | `mmux_service_skill.py` | 语言解析 + 技能等级 | 3 | 叶子 |
 | `mmux_service_capability.py` | 权限校验 / 能力执行（唯一收口） | 7 | 只调 infra |
 | `mmux_service_scenario.py` | 场景判定 + 审计落库 | 12 | 只调 infra |
-| `mmux_service_loop.py` | agent 循环：scratchpad / observe / step / turn | 17 | 唯一有内部回指的簇 |
+| `mmux_service_loop.py` | agent 循环：session 记忆 / observe（世界状态）/ step / turn | 17 | 唯一有内部回指的簇 |
 | `mmux_service_flow.py` | 任务与脚本化引导 | 21 | 单向调 loop |
 | `mmux_service_plan.py` | 计划提议与执行 | 4 | 只调 infra |
 
