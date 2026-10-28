@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 jeffery9@gmail.com & geninit
+# License LGPL-3.0 or later (https://www.gnu.org/licenses/lgpl-3.0.html)
 """Warehouse BDD tests (PRD §10.2 仓库验收 / §10.3 安全验收)."""
 from odoo.tests import TransactionCase, tagged
 from odoo import Command

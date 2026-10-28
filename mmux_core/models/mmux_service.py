@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 jeffery9@gmail.com & geninit
+# License LGPL-3.0 or later (https://www.gnu.org/licenses/lgpl-3.0.html)
 """`mmux.service` -- the Odoo-side facade in front of the pure core.
 
 This file holds the model declaration only.  The behaviour lives in sibling

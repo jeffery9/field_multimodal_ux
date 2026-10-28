@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 jeffery9@gmail.com & geninit
+# License LGPL-3.0 or later (https://www.gnu.org/licenses/lgpl-3.0.html)
 """Scenario detection and the audit trail.
 Scenario is a security boundary: the same source decides what is offered
 to the model AND what the answer is validated against, so it is derived
