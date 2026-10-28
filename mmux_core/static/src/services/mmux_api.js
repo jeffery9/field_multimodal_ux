@@ -198,6 +198,7 @@ export const AGENT_ACTION_LABELS = {
     answer: _t("Answer"),
     finish: _t("Finish"),
     delegate_pick: _t("Hand over task pick"),
+    perceive_image: _t("Look at the image"),
 };
 
 export const AGENT_STATE_LABELS = {

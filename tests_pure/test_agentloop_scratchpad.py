@@ -404,7 +404,17 @@ class TestSingleLedger(unittest.TestCase):
 
 
 class TestProgressStall(unittest.TestCase):
-    """Spin detection is about PROGRESS, not textual repetition (§14.5)."""
+    """Spin detection is about PROGRESS, not textual repetition (§14.5).
+
+    Contract: the FIRST sighting of a world fingerprint counts as
+    evidence of movement — the server observes the record again only
+    after an action ran, so "changed since last observation" is exactly
+    what a fingerprint delta means (see `_world_fingerprint`'s note on
+    first-turn semantics). A stalled loop is therefore K consecutive
+    effectful folds over an UNCHANGED, uninformative world; with
+    `_max_stall = 3` that trips on the third such fold, never earlier
+    and never later.
+    """
 
     def _cap_action(self, quantity):
         # distinct record ids keep the exact-repeat ledger out of these
@@ -437,9 +447,14 @@ class TestProgressStall(unittest.TestCase):
         # record ids keep the exact-repeat ledger silent so ONLY the
         # stall counter can trip — which is exactly the point (§14.5).
         w = {"q": "same"}
+        # fold 0 seeds the fingerprint: a lone first observation is not
+        # yet evidence of spinning (the server has never seen this world
+        # before, so "changed since last" is vacuously true — see the
+        # class docstring's contract).
+        self.assertFalse(self._fold(s, w, self._cap_action(0)))
         stalled = [self._fold(s, w, self._cap_action(i))
-                   for i in range(4)]
-        self.assertEqual(stalled, [False, False, True, True])
+                   for i in range(1, 4)]
+        self.assertEqual(stalled, [False, True, True])
 
     def test_informative_status_resets_the_stall(self):
         s = AgentScratchpad()

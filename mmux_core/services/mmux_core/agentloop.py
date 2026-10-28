@@ -766,7 +766,8 @@ class AgentScratchpad:
     """
 
     __slots__ = SCRATCHPAD_KEYS + ("_repeats", "_stall", "_last_world_fp",
-                                   "_max_turns", "_max_calls", "_max_stall")
+                                   "_max_turns", "_max_calls",
+                                   "_max_perception", "_max_stall")
 
     def __init__(self, goal="", task_id=None, flow_id=None,
                  skill_level="novice", lang=NORMALIZED_LANG,
@@ -794,6 +795,12 @@ class AgentScratchpad:
         # being handed a string / None / a float rather than raising.
         self.turn = _as_count(turn)
         self.capability_calls = _as_count(capability_calls)
+        # v3.5 multimodal: a plain counter of vision round trips this
+        # loop already spent. Persisted like any other SCRATCHPAD_KEYS
+        # entry (from_dict hands it over as a kwarg), sanitised the same
+        # way the other counters are — a hand-edited blob must not be
+        # able to crash or inflate it.
+        self.perception_calls = _as_count(perception_calls)
         # runtime-only repeat ledger; deliberately not in the persisted
         # shape (see note_repeat).
         self._repeats: Dict[str, int] = {}
@@ -815,6 +822,13 @@ class AgentScratchpad:
         self._max_turns = _as_count(max_turns) or MAX_AGENT_TURNS
         self._max_calls = (_as_count(max_capability_calls)
                            or MAX_AGENT_CAPABILITY_CALLS)
+        self._max_perception = (_as_count(max_perception_calls)
+                                or MAX_AGENT_PERCEPTION_CALLS)
+        # `run_loop` re-injects this from caller configuration on every
+        # step; the default keeps a bare scratchpad (or one driven
+        # through `note_progress` directly, as the stall tests do)
+        # functional instead of crashing on an unassigned slot.
+        self._max_stall = MAX_STALLED_TURNS
 
     # ---- mutation helpers (kept tiny and explicit) ----------------- #
     def mark_step(self, step_id):
@@ -842,6 +856,15 @@ class AgentScratchpad:
     def note_capability_call(self):
         self.capability_calls += 1
 
+    def note_perception_call(self):
+        """Charge the multimodal budget for one vision round trip.
+
+        Called by `run_loop` when a `perceive_image` action is carried
+        out — NOT when it is merely proposed without a runner: no
+        provider was called, so nothing was spent.
+        """
+        self.perception_calls += 1
+
     def record_outcome(self, action, result):
         """Append one bounded `action -> effect` summary to the ledger.
 
@@ -853,6 +876,10 @@ class AgentScratchpad:
         entry = {
             "turn": self.turn,
             "capability_id": getattr(action, "capability_id", None),
+            # perception entries carry a null capability_id — they are
+            # not writes. The action name says what kind of step this
+            # was, so the derived history (§14.4) can replay it truthfully.
+            "action": getattr(action, "action", None),
             "status": (result or {}).get("status"),
             "detail": str((result or {}).get("result")
                           or (result or {}).get("error")
@@ -899,6 +926,15 @@ class AgentScratchpad:
     @property
     def calls_left(self):
         return max(0, self._max_calls - self.capability_calls)
+
+    @property
+    def perception_left(self):
+        """Multimodal budget remaining — symmetric with `calls_left`.
+
+        A number for the prompt and the loop's own check; the image data
+        itself never passes through here.
+        """
+        return max(0, self._max_perception - self.perception_calls)
 
     def to_dict(self):
         """Only the declared keys — memory is not extensible at runtime."""
@@ -1197,10 +1233,12 @@ def run_loop(scratchpad: AgentScratchpad,
              llm_call: Optional[Callable] = None,
              llm_config: Optional[Dict[str, Any]] = None,
              run_capability: Optional[Callable] = None,
+             run_perception: Optional[Callable] = None,
              allowed_capabilities=None,
              history: Optional[List[Dict[str, Any]]] = None,
              max_turns: int = MAX_AGENT_TURNS,
              max_capability_calls: int = MAX_AGENT_CAPABILITY_CALLS,
+             max_perception_calls: int = MAX_AGENT_PERCEPTION_CALLS,
              max_repeated_step: int = MAX_REPEATED_STEP,
              max_stalled_turns: int = MAX_STALLED_TURNS) -> AgentTurn:
     """Advance the loop by exactly ONE step and report what happened.
@@ -1215,6 +1253,12 @@ def run_loop(scratchpad: AgentScratchpad,
     (normally `PROVIDER_REGISTRY.call` partially applied). `run_capability`
     is normally `mmux.service.execute_capability`; when absent, a
     capability call is *proposed* but not run, and the state says so.
+    `run_perception(action) -> {"status": ..., "result"|"error": ...}` is
+    the multimodal runner the Odoo layer supplies (it resolves the opaque
+    `ref` against the loop's OWN media list and calls the vision/OCR
+    provider); when absent, a perception call is *proposed* but not run —
+    the same degradation semantics as `run_capability`, and nothing is
+    charged to the perception budget because no round trip happened.
 
     Returns an `AgentTurn`. Never raises for a model problem.
 
@@ -1241,6 +1285,8 @@ def run_loop(scratchpad: AgentScratchpad,
     scratchpad._max_turns = _as_count(max_turns) or MAX_AGENT_TURNS
     scratchpad._max_calls = (_as_count(max_capability_calls)
                              or MAX_AGENT_CAPABILITY_CALLS)
+    scratchpad._max_perception = (_as_count(max_perception_calls)
+                                  or MAX_AGENT_PERCEPTION_CALLS)
     # same clamp for the repeat / stall limits: None/0/negative must mean
     # the module default, never "no limit" and never a comparison crash.
     max_repeated_step = (_as_count(max_repeated_step)
