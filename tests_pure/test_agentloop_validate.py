@@ -530,8 +530,14 @@ class TestAgentActionObject(unittest.TestCase):
     def test_signature_reflects_params_width(self):
         """Params are part of a call's identity: the same capability on
         the same record with different param *keys* is a different call.
-        (Values deliberately do NOT affect the signature, so a model
-        cannot spin by re-proposing with a tweaked number.)"""
+
+        v3.5 (docs/CONFIG.md §14.5): param VALUES now also distinguish
+        signatures. The old keys-only rule guarded a scripted loop where
+        "same action, tweaked number" was evasion; under the reasoning
+        model it is self-correction (wrong quantity -> right quantity),
+        and the anti-abuse backstop moved to the total budgets plus the
+        progress-based stall test.
+        """
         s1 = validate_action({"action": ACT_CALL_CAPABILITY,
                               "payload": {"capability_id": "product_lookup",
                                           "record_id": 1,
@@ -543,13 +549,28 @@ class TestAgentActionObject(unittest.TestCase):
                                           "params": {"lot": "L1"}}},
                              WHITELIST).signature
         self.assertNotEqual(s1, s2)
-        # ...but a changed *value* on the same key is the same step
+        # ...and a changed *value* on the same key is a DIFFERENT call:
+        # a corrected retry must not be swallowed as a repeat.
         s3 = validate_action({"action": ACT_CALL_CAPABILITY,
                               "payload": {"capability_id": "product_lookup",
                                           "record_id": 1,
                                           "params": {"quantity": 9}}},
                              WHITELIST).signature
-        self.assertEqual(s1, s3)
+        self.assertNotEqual(s1, s3)
+        # identical params still compare equal, regardless of key order
+        s4 = validate_action({"action": ACT_CALL_CAPABILITY,
+                              "payload": {"capability_id": "product_lookup",
+                                          "record_id": 1,
+                                          "params": {"quantity": 5,
+                                                     "lot": "L1"}}},
+                             WHITELIST).signature
+        s5 = validate_action({"action": ACT_CALL_CAPABILITY,
+                              "payload": {"capability_id": "product_lookup",
+                                          "record_id": 1,
+                                          "params": {"lot": "L1",
+                                                     "quantity": 5}}},
+                             WHITELIST).signature
+        self.assertEqual(s4, s5)
 
     def test_signature_stable_for_identical_proposals(self):
         p = {"action": ACT_PROPOSE_STEP,
