@@ -88,11 +88,16 @@ ACT_ANSWER = "answer"
 ACT_FINISH = "finish"
 #: Hand the "which task?" decision to the queue-level agent (`agent.py`).
 ACT_DELEGATE_PICK = "delegate_pick"
+#: Ask the multimodal perception channel (vision / OCR provider) about an
+#: image attached to THIS task. Reasoning-first: the model decides WHEN
+#: looking is worth a turn; the server only ever shows it its own media.
+ACT_PERCEIVE_IMAGE = "perceive_image"
 
 #: The COMPLETE list of actions the model may emit. Anything else is
 #: rejected outright — this tuple is the boundary, not a suggestion.
 AGENT_ACTIONS = (ACT_CALL_CAPABILITY, ACT_PROPOSE_STEP, ACT_ASK_USER,
-                 ACT_ANSWER, ACT_FINISH, ACT_DELEGATE_PICK)
+                 ACT_ANSWER, ACT_FINISH, ACT_DELEGATE_PICK,
+                 ACT_PERCEIVE_IMAGE)
 
 #: Which fields each action may carry. A payload key outside its action's
 #: set rejects the whole action (see module docstring, boundary 2).
@@ -106,6 +111,7 @@ ACTION_PAYLOAD_KEYS = {
     ACT_ANSWER: frozenset({"text", "why"}),
     ACT_FINISH: frozenset({"summary", "goal_met", "why"}),
     ACT_DELEGATE_PICK: frozenset({"reason"}),
+    ACT_PERCEIVE_IMAGE: frozenset({"ref", "instruction", "purpose", "why"}),
 }
 
 #: Free-text fields on any action, bounded so a chatty model cannot
@@ -114,6 +120,14 @@ MAX_TEXT_LEN = 600
 MAX_SUMMARY_LEN = 800
 MAX_PARAMS_KEYS = 12
 MAX_OPTIONS = 6
+#: `perceive_image.ref` is an opaque handle into the loop's OWN media
+#: list; it never carries bytes, URLs or model names. Bounded like any
+#: other text field so a chatty model cannot inflate an audit row.
+MAX_MEDIA_REF_LEN = 64
+#: Closed set of perception intents for one image. Anything else the
+#: model proposes collapses to "describe" — the server, not the model,
+#: owns what the vision provider is actually told.
+IMAGE_PURPOSES = ("ocr", "describe")
 
 #: Provenance of one loop step. Mirrors `agent.py`'s tri-state so the
 #: frontend can render "the model decided" vs "we fell back".
@@ -132,17 +146,49 @@ MAX_AGENT_TURNS = 6
 #: a loop that proposes six writes is almost certainly stuck, and stopping
 #: is always safer than continuing.
 MAX_AGENT_CAPABILITY_CALLS = 3
+#: Multimodal perception calls are NOT business writes: they read an
+#: image the operator already attached to THIS task through the vision
+#: provider. They still cost a round trip and a turn, so they get their
+#: own small budget rather than borrowing the write budget — a model
+#: that keeps "looking" at a blurry photo must stop for the same reason
+#: a model that keeps writing must stop.
+MAX_AGENT_PERCEPTION_CALLS = 2
 #: Repeats of the identical step (same action + same signature) that end
 #: the loop. Guards the classic ReAct failure of proposing step A forever.
+#: (v3.5 note: the signature now includes param VALUES for capability
+#: calls, so a corrected retry is legitimate exploration, not a repeat.)
 MAX_REPEATED_STEP = 2
+#: Consecutive turns that change neither the world state nor bring new
+#: information before the loop is called stalled. This is the v3.5 spin
+#: test: progress, not textual repetition, decides whether the agent is
+#: stuck — an agent may re-issue the same action all day long if each
+#: attempt learns something or moves the record.
+MAX_STALLED_TURNS = 3
+#: How many recent action->outcome summaries the scratchpad keeps as the
+#: causal chain the next observation is built on. Bounded: memory that
+#: grows without limit is a token leak waiting to happen.
+MAX_RECENT_OUTCOMES = 6
+#: Conversation window cap (turns) fed to `build_loop_prompt`, and the
+#: bound `_scratchpad_history` derives from. Two turns of dialogue can
+#: legitimately fill one budget turn, hence the headroom over
+#: MAX_AGENT_TURNS; the loop module mirrors it for the persisted blob
+#: history (`MAX_AGENT_HISTORY`).
+MAX_PROMPT_TURNS = MAX_AGENT_TURNS * 2
 
 #: Live keys of the scratchpad — the agent's whole working memory. Closed
 #: by design: the model cannot widen its own memory, and nothing here is
 #: secret (no other records, no other users' data). `confirmed` is
 #: deliberately ABSENT: residual state must not be able to carry it.
+#: v3.5 adds `recent_outcomes` (the action -> world-change ledger) and
+#: removes the old pollution path: `done_steps` now holds ONLY human
+#: readable step ids, never internal signatures. Multimodal reasoning
+#: adds `perception_calls` — a plain counter of vision round trips this
+#: loop already spent (a number, not bytes: image data NEVER enters the
+#: agent's persisted memory).
 SCRATCHPAD_KEYS = ("goal", "task_id", "flow_id", "skill_level", "lang",
                    "done_steps", "last_error", "user_answers", "turn",
-                   "capability_calls")
+                   "capability_calls", "recent_outcomes",
+                   "perception_calls")
 
 #: Language keys accepted inside a multilingual text field. Mirrors the
 #: languages `i18n.normalize_lang` can actually produce, so a payload is
@@ -258,13 +304,30 @@ class AgentAction:
         return self.action == ACT_CALL_CAPABILITY
 
     @property
+    def is_perception_call(self):
+        """A multimodal read: no business effect, but a real round trip."""
+        return self.action == ACT_PERCEIVE_IMAGE
+
+    @property
+    def media_ref(self):
+        return self.payload.get("ref")
+
+    @property
+    def purpose(self):
+        return self.payload.get("purpose") or "describe"
+
+    @property
+    def instruction(self):
+        return self.payload.get("instruction") or ""
+
+    @property
     def signature(self):
         """Stable identity of this step, for repeat detection.
 
         Two `propose_step` actions with the same step_id are "the same
         step" even if the wording drifted; two `call_capability` actions
-        are the same when the capability, the target record AND the param
-        keys match.
+        are the same when the capability, the target record AND the
+        params (keys *and* values) match.
 
         `record_id=None` (which means *use the context record*) is spelled
         "ctx", never 0 — 0 is a legitimate record id in this vocabulary, so
@@ -276,27 +339,33 @@ class AgentAction:
         through a recipe). `answer` / `ask_user` are conversation, not
         progress — two answers in a row are a legitimate dialogue, and
         treating them as a spin would cut an operator off mid-explanation.
-        They are identified by their text so distinct turns stay distinct.
+        They carry NO identity at all (see `_sig_key`), which is what
+        takes them out of the repeat ledger entirely.
 
-        Params compare by key only — values are validated by the capability
-        schema, and two different quantities on the same record are
-        deliberately treated as the same step so a model cannot spin by
-        re-proposing the same action with a tweaked number.
+        v3.5: params compare by key AND value. The old keys-only rule was
+        written against a scripted loop where re-proposing "the same
+        action with a tweaked number" was evasion; under the reasoning
+        model it is exactly what self-correction looks like (the first
+        quantity was wrong, the second one is right). The anti-abuse
+        backstop moved to the total budgets (`MAX_AGENT_CAPABILITY_CALLS`)
+        and the progress-based stall test, neither of which a corrected
+        retry can dodge. Values are canonicalised through JSON so {1: "a"}
+        and {"1": "a"} cannot masquerade as distinct signatures.
         """
         if self.action == ACT_CALL_CAPABILITY:
             return (self.action, self.capability_id,
                     self.record_id if self.record_id is not None else "ctx",
-                    tuple(sorted(self.params)))
+                    _canon_params(self.params))
         if self.action == ACT_PROPOSE_STEP:
             return (self.action, self.payload.get("step_id"), None, ())
-        if self.action == ACT_ASK_USER:
-            return (self.action, _sig_text(self.payload.get("field")),
-                    _sig_text(self.payload.get("question")), ())
-        if self.action == ACT_ANSWER:
-            # no side effect: identity is the text, so a repeated *idea*
-            # is still detected but a normal back-and-forth is not.
-            return (self.action, _sig_text(self.payload.get("text")),
-                    None, ())
+        if self.action == ACT_PERCEIVE_IMAGE:
+            # looking at the SAME image with the SAME intent twice is a
+            # spin; re-looking with a different instruction (the photo
+            # was blurry, the OCR purpose was wrong) is exploration.
+            return (self.action, self.payload.get("ref") or "",
+                    self.purpose, _sig_text(self.instruction))
+        # ask_user / answer / finish / delegate_pick: conversation or
+        # termination, not progress — deliberately no repeat identity.
         return (self.action, None, None, ())
 
     def to_dict(self, lang=None):
@@ -489,6 +558,22 @@ def _clean_payload(action, payload) -> Dict[str, Any]:
     elif action == ACT_DELEGATE_PICK:
         out["reason"] = _clean_text(payload.get("reason"))
 
+    elif action == ACT_PERCEIVE_IMAGE:
+        # the ref is an opaque handle into the loop's OWN media list —
+        # never bytes, URLs or model names (see MAX_MEDIA_REF_LEN).
+        ref = payload.get("ref")
+        out["ref"] = ref.strip()[:MAX_MEDIA_REF_LEN] \
+            if isinstance(ref, str) else ""
+        # the server owns what the vision provider is actually told:
+        # anything outside IMAGE_PURPOSES collapses to "describe"
+        # rather than being passed through or rejected outright — a
+        # model that invents a purpose still gets its look, just on
+        # our terms.
+        purpose = payload.get("purpose")
+        out["purpose"] = purpose if purpose in IMAGE_PURPOSES else "describe"
+        out["instruction"] = _clean_text(payload.get("instruction"))
+        out["why"] = _clean_text(payload.get("why"))
+
     return out
 
 
@@ -519,6 +604,14 @@ def _requirement_problem(action, clean, allowed_caps) -> Optional[str]:
         if _is_blank(clean.get("text")):
             return "answer_requires_text"
 
+    elif action == ACT_PERCEIVE_IMAGE:
+        # an empty ref is a call at nothing: the server can only show
+        # the model images that THIS loop holds, and it needs to know
+        # which one. (Whether the ref EXISTS is checked by the runner —
+        # the pure core has no media list of its own.)
+        if not clean.get("ref"):
+            return "perceive_image_requires_ref"
+
     return None
 
 
@@ -529,21 +622,47 @@ class AgentObservation:
     """What the agent is allowed to see at the top of a turn.
 
     Built by the server, never by the model. It is deliberately narrow:
-    the goal, the current task/flow, the step the operator is on, the
-    outcome of the previous action, and the answers given so far. It is
-    NOT a database view — no other records, no other users' tasks, no
-    customer data beyond the localized task title the operator can
+    the goal, the task, the *world state* (a bounded view of the record
+    being worked on), the outcome ledger of previous actions, the recipe
+    as a whole (reference material only) and the answers given so far.
+    It is NOT a database view — no other records, no other users' tasks,
+    no customer data beyond the localized task title the operator can
     already see.
+
+    v3.5 reasoning-first contract
+    -----------------------------
+    The observation used to be *cursor-driven*: `current_step` told the
+    model which script line to read out next, which made the loop a
+    workflow player with an LLM costume. The decision basis now is
+    ``goal + world_state + recent_outcomes + history``.
+
+    The recipe has NOT been thrown away — it is the standard operating
+    procedure (SOP) contributed by the work-scenario definition, and an
+    SOP is exactly the kind of prior a reasoning agent should exploit.
+    What changed is its SHAPE in the observation: instead of one cursor
+    pointing at "the line to read next", the model receives the whole
+    procedure annotated with what the server already knows about
+    progress (`done`) and where the official path currently stands
+    (`next`). The agent may adopt, reorder, skip or replace any step on
+    the evidence; the annotations are context, never commands.
+
+    ``current_step`` still exists for ONE reason: the deterministic
+    no-LLM fallback narrates it (`_fallback_action`). It stays OUT of
+    the prompt dict as a bare cursor — the same information reaches the
+    model through the per-step `next` marker, where it sits beside the
+    freedom to disagree with it.
     """
 
     __slots__ = ("goal", "task", "flow_id", "skill_level", "lang",
                  "current_step", "steps", "last_result", "answers",
-                 "available_capabilities")
+                 "available_capabilities", "world_state", "recent_outcomes",
+                 "_done_ids")
 
     def __init__(self, goal="", task=None, flow_id=None, skill_level="novice",
                  lang=NORMALIZED_LANG, current_step=None, steps=None,
                  last_result=None, answers=None,
-                 available_capabilities=None):
+                 available_capabilities=None, world_state=None,
+                 recent_outcomes=None, done_ids=None):
         self.goal = goal
         self.task = dict(task or {})
         self.flow_id = flow_id
@@ -554,6 +673,16 @@ class AgentObservation:
         self.last_result = last_result
         self.answers = dict(answers or {})
         self.available_capabilities = list(available_capabilities or ())
+        # server-collected bounded view of the record under work
+        self.world_state = dict(world_state or {})
+        # action -> effect ledger carried from the scratchpad
+        self.recent_outcomes = list(recent_outcomes or ())
+        # the SERVER's authoritative done-step ledger (blob `done_ids`),
+        # used only to annotate `recipe_reference` with `done` markers.
+        # Deliberately not its own prompt key: it would duplicate
+        # `scratchpad.done_steps` and give the model two ledgers to
+        # reconcile — the exact asymmetry v3.5 exists to remove.
+        self._done_ids = [d for d in (done_ids or ()) if isinstance(d, str)]
 
     def to_prompt_dict(self, lang=None):
         """The JSON the model actually receives.
@@ -561,8 +690,34 @@ class AgentObservation:
         `available_capabilities` is the whitelist restated in the payload
         so the model can see exactly what it is permitted to name —
         offering it the list is not a leak, it is the whole constraint.
+
+        What is NOT here is as important as what is: there is no bare
+        `current_step` cursor. The recipe arrives as `recipe_reference`,
+        the work scenario's standard operating procedure, annotated per
+        step with `done` (the server has already seen that step through)
+        and `next` (where the official path currently stands). An
+        un-annotated numbered list handed to a reasoning model reads as a
+        queue; an annotated one reads as evidence about progress — which
+        is what an SOP should look like to an agent that decides for
+        itself.
         """
         lg = lang or self.lang
+        done_ids = set(getattr(self, "_done_ids", None) or ())
+        current = self.current_step or {}
+        current_id = current.get("step_id") if isinstance(current, dict)             else None
+        reference = []
+        for step in self.steps:
+            if not isinstance(step, dict):
+                continue
+            entry = {
+                k: resolve_text(v, lg) if isinstance(v, dict) else v
+                for k, v in step.items()
+                if k in ("step_id", "title", "voice_prompt", "input_type",
+                         "capability_id", "hint")}
+            sid = entry.get("step_id")
+            entry["done"] = bool(sid and sid in done_ids)
+            entry["next"] = bool(sid and sid == current_id)
+            reference.append(entry)
         return {
             "goal": resolve_text(self.goal, lg) if self.goal else "",
             "task": {k: resolve_text(v, lg) if isinstance(v, dict) else v
@@ -570,13 +725,11 @@ class AgentObservation:
             "flow_id": self.flow_id,
             "skill_level": self.skill_level,
             "lang": lg,
-            "current_step": (
-                {k: resolve_text(v, lg) if isinstance(v, dict) else v
-                 for k, v in self.current_step.items()}
-                if isinstance(self.current_step, dict) else None),
-            "steps_remaining": len(self.steps),
+            "world_state": self.world_state,
             "last_result": self.last_result,
+            "recent_outcomes": self.recent_outcomes,
             "answers": self.answers,
+            "recipe_reference": reference,
             "available_capabilities": self.available_capabilities,
         }
 
@@ -596,19 +749,33 @@ class AgentScratchpad:
     mental state the agent accumulates — it is a fresh human gesture
     required at the moment of each L2 write.
 
-    `__slots__` is `SCRATCHPAD_KEYS` plus one runtime-only slot. The
+    v3.5 single-ledger rules (see docs/CONFIG.md §14.3):
+
+    * `done_steps` holds ONLY human-readable step ids. Capability calls
+      never mark it; their effects go to `recent_outcomes`. The old code
+      wrote internal signatures here, which then flowed back into the
+      prompt and polluted the model's world model with strings it could
+      neither read nor act on.
+    * `recent_outcomes` is the action -> effect ledger: bounded, truncated
+      summaries of what each executed action did, so the next turn can
+      reason on cause, not amnesia.
+
+    `__slots__` is `SCRATCHPAD_KEYS` plus runtime-only slots. The
     persisted / emitted key set stays exactly `SCRATCHPAD_KEYS` (see
     `to_dict`), so memory cannot be widened by anything the model says.
     """
 
-    __slots__ = SCRATCHPAD_KEYS + ("_repeats", "_max_turns", "_max_calls")
+    __slots__ = SCRATCHPAD_KEYS + ("_repeats", "_stall", "_last_world_fp",
+                                   "_max_turns", "_max_calls", "_max_stall")
 
     def __init__(self, goal="", task_id=None, flow_id=None,
                  skill_level="novice", lang=NORMALIZED_LANG,
                  done_steps=None, last_error=None, user_answers=None,
-                 turn=0, capability_calls=0,
+                 turn=0, capability_calls=0, recent_outcomes=None,
+                 perception_calls=0,
                  max_turns=MAX_AGENT_TURNS,
-                 max_capability_calls=MAX_AGENT_CAPABILITY_CALLS):
+                 max_capability_calls=MAX_AGENT_CAPABILITY_CALLS,
+                 max_perception_calls=MAX_AGENT_PERCEPTION_CALLS):
         self.goal = goal
         self.task_id = task_id
         self.flow_id = flow_id
@@ -617,6 +784,12 @@ class AgentScratchpad:
         self.done_steps = list(done_steps or [])
         self.last_error = last_error
         self.user_answers = dict(user_answers or {})
+        # the outcome ledger; entries are small dicts written by
+        # `record_outcome` only — from_dict sanitises anything a hand
+        # edited blob may have put there.
+        self.recent_outcomes = [dict(o) for o in recent_outcomes
+                                if isinstance(o, dict)][-MAX_RECENT_OUTCOMES:] \
+            if isinstance(recent_outcomes, (list, tuple)) else []
         # counters come from a persisted JSON blob, so they must survive
         # being handed a string / None / a float rather than raising.
         self.turn = _as_count(turn)
@@ -624,6 +797,14 @@ class AgentScratchpad:
         # runtime-only repeat ledger; deliberately not in the persisted
         # shape (see note_repeat).
         self._repeats: Dict[str, int] = {}
+        # runtime-only progress ledger (v3.5): how many consecutive
+        # effectful turns changed neither the world nor learned anything,
+        # and the fingerprint of the last-seen world state. Like
+        # `_repeats`, this is spin bookkeeping, not agent memory — a
+        # resumed loop recomputes it from the fresh observation instead
+        # of trusting a stale counter.
+        self._stall = 0
+        self._last_world_fp = None
         # runtime-only budgets, same class as `_repeats`: they are injected
         # by `run_loop` on every step (from caller configuration), never
         # persisted — a resumed loop gets them re-injected fresh, so a
@@ -637,8 +818,15 @@ class AgentScratchpad:
 
     # ---- mutation helpers (kept tiny and explicit) ----------------- #
     def mark_step(self, step_id):
-        """Record a completed step exactly once (order preserved)."""
-        if step_id and step_id not in self.done_steps:
+        """Record a completed step exactly once (order preserved).
+
+        v3.5 guard rail: only human-readable ids enter the ledger. An
+        internal signature reaching here would resurrect the pollution
+        bug this edit exists to kill, so non-strings are dropped rather
+        than coerced.
+        """
+        if isinstance(step_id, str) and step_id and ":" not in step_id \
+                and step_id not in self.done_steps:
             self.done_steps.append(step_id)
 
     def answer(self, key, value):
@@ -654,6 +842,25 @@ class AgentScratchpad:
     def note_capability_call(self):
         self.capability_calls += 1
 
+    def record_outcome(self, action, result):
+        """Append one bounded `action -> effect` summary to the ledger.
+
+        Called by `run_loop` after a capability ran (or was parked). This
+        is where execution effects live now — NOT in `done_steps`: the
+        model reads outcomes as evidence about the world, not as a
+        checklist to recite.
+        """
+        entry = {
+            "turn": self.turn,
+            "capability_id": getattr(action, "capability_id", None),
+            "status": (result or {}).get("status"),
+            "detail": str((result or {}).get("result")
+                          or (result or {}).get("error")
+                          or "")[:200],
+        }
+        self.recent_outcomes = (self.recent_outcomes + [entry]) \
+            [-MAX_RECENT_OUTCOMES:]
+
     # ---- repeat ledger --------------------------------------------- #
     #: A per-step occurrence counter, *not* part of `SCRATCHPAD_KEYS`.
     #: It is bookkeeping for spin detection, not agent memory: deriving it
@@ -665,6 +872,25 @@ class AgentScratchpad:
 
     def repeats(self, sig):
         return self._repeats.get(sig, 0)
+
+    # ---- progress ledger (v3.5 stall detection) --------------------- #
+    def note_progress(self, world_fingerprint, gained_new_info):
+        """Fold one effectful turn into the stall counter.
+
+        Returns True when the loop is STALLED: `MAX_STALLED_TURNS`
+        consecutive effectful turns that neither moved the world nor
+        brought new information. Textual repetition is not the test —
+        a retry that changes a param, learns something, or moves the
+        record resets the counter, because under the reasoning model
+        that is precisely what making progress looks like.
+        """
+        world_changed = (world_fingerprint != self._last_world_fp)
+        self._last_world_fp = world_fingerprint
+        if world_changed or gained_new_info:
+            self._stall = 0
+        else:
+            self._stall += 1
+        return self._stall >= self._max_stall
 
     @property
     def budget_left(self):
@@ -782,8 +1008,12 @@ def build_loop_prompt(scratchpad: AgentScratchpad,
         "You are the operations agent embedded in an Odoo field assistant. "
         "You guide ONE human operator through ONE task, one step at a time.\n"
         "\n"
-        "You decide what happens next. Choose exactly ONE action per turn "
-        "and reply with ONE JSON object:\n"
+        "You decide what happens next. You are NOT reading a script: you "
+        "reason over the evidence in each observation — the goal, the "
+        "world_state (current bounded view of the record under work), the "
+        "outcomes of your own previous actions — and choose the action the "
+        "evidence supports. Choose exactly ONE action per turn and reply "
+        "with ONE JSON object:\n"
         '  {"action": "<one of the action names>", "payload": {...}}\n'
         "\n"
         "The COMPLETE set of actions and the ONLY payload keys each may "
@@ -802,15 +1032,32 @@ def build_loop_prompt(scratchpad: AgentScratchpad,
         "3. Never guess business-critical values (quantities, lots, money, "
         "destinations). If you need one, use `ask_user` and stop — that is "
         "the correct, expected behaviour, not a failure.\n"
-        "4. Prefer `propose_step` while the operator is working (it is "
-        "what they hear), and `call_capability` only when the step is "
-        "actually done. Use `finish` when the goal is met.\n"
+        "4. `recipe_reference` is the standard operating procedure (SOP) "
+        "defined for this work scenario. Treat it as authoritative "
+        "background, NOT as a queue to recite: `done` marks steps the "
+        "server has already seen through, `next` marks where the official "
+        "path currently stands. Follow the SOP by default; deviate — "
+        "reorder, skip or replace a step — only when the evidence in "
+        "world_state or recent_outcomes justifies it, and say why in the "
+        "payload's `why` (e.g. if world_state already shows a quantity "
+        "reported, do not report it again). Never mark a step `done` "
+        "yourself: progress comes from actions that ran, not from claims. "
+        "When you narrate a step, use `propose_step`; use "
+        "`call_capability` when the step is actually done. Use `finish` "
+        "when the goal is met.\n"
         "\n"
         "Write all user-facing text in the operator's language "
         f"(lang = {lg}). Always reply with JSON. Never add prose outside "
         "the JSON object."
     )
     messages: List[Dict[str, str]] = [{"role": "system", "content": sys}]
+    # v3.5 (§14.4): when the caller supplies no explicit history, the
+    # conversation window is DERIVED from the scratchpad's own ledgers —
+    # past narrated steps and outcome pairs — so even a single-step test
+    # or a resumed session sees its causal chain instead of restarting
+    # amnesic every turn.
+    if not history:
+        history = _scratchpad_history(scratchpad)
     # prior turns, so the model sees what it already did and what happened
     # NOTE: this is the PROMPT WINDOW SIZE, not the behaviour budget — it
     # deliberately stays the module constant even though run_loop accepts
@@ -903,7 +1150,26 @@ def _fallback_action(observation, scratchpad) -> AgentAction:
     single point of failure: if the LLM cannot be reached, the operator
     still gets exactly the guided recipe they had before v3.0 — narrated
     in order, with no made-up content and no execution.
+
+    The SOP exception (v3.5): when the scenario's standard operating
+    procedure has been *fully* narrated per the server's own ledger but
+    the goal is not yet met, blindly re-narrating the last step is worse
+    than silence — the loop hands over to the task agent (`delegate_pick`),
+    which is the designed escalation for "the script ran out, reasoning
+    is needed". With an LLM this path is unreachable; it exists so the
+    degraded mode terminates cleanly instead of looping on a stale cursor.
     """
+    # SOP exhausted per the authoritative ledger -> escalate, do not
+    # recite the tail of a finished procedure.
+    steps = [s for s in (getattr(observation, "steps", None) or [])
+             if isinstance(s, dict)]
+    if steps:
+        remaining = [s for s in steps
+                     if s.get("step_id")
+                     and s.get("step_id") not in scratchpad.done_steps]
+        if not remaining:
+            return AgentAction(action=ACT_DELEGATE_PICK, ok=True,
+                               payload={"reason": "recipe exhausted"})
     current = observation.current_step or {}
     step_id = current.get("step_id")
     if step_id and step_id not in scratchpad.done_steps:
@@ -935,7 +1201,8 @@ def run_loop(scratchpad: AgentScratchpad,
              history: Optional[List[Dict[str, Any]]] = None,
              max_turns: int = MAX_AGENT_TURNS,
              max_capability_calls: int = MAX_AGENT_CAPABILITY_CALLS,
-             max_repeated_step: int = MAX_REPEATED_STEP) -> AgentTurn:
+             max_repeated_step: int = MAX_REPEATED_STEP,
+             max_stalled_turns: int = MAX_STALLED_TURNS) -> AgentTurn:
     """Advance the loop by exactly ONE step and report what happened.
 
     One step at a time, deliberately. A single call that ran until
@@ -950,6 +1217,19 @@ def run_loop(scratchpad: AgentScratchpad,
     capability call is *proposed* but not run, and the state says so.
 
     Returns an `AgentTurn`. Never raises for a model problem.
+
+    v3.5 changes in here (docs/CONFIG.md §14):
+
+    * `done_steps` is no longer polluted with internal signatures — only
+      human-readable step ids are marked, capability effects go to
+      `recent_outcomes` (§14.3);
+    * history is BUILT from the scratchpad itself, so a resumed session
+      replays its own actions instead of starting amnesic every turn
+      (§14.4);
+    * spin detection is PROGRESS-based: identical text is no longer the
+      trigger — K consecutive turns that change neither the world nor
+      bring new information are (§14.5). `answer` / `ask_user` are out
+      of the count entirely.
     """
     turn = AgentTurn(observation=observation)
 
@@ -961,10 +1241,12 @@ def run_loop(scratchpad: AgentScratchpad,
     scratchpad._max_turns = _as_count(max_turns) or MAX_AGENT_TURNS
     scratchpad._max_calls = (_as_count(max_capability_calls)
                              or MAX_AGENT_CAPABILITY_CALLS)
-    # same clamp for the repeat limit: None/0/negative must mean the
-    # module default, never "no limit" and never a comparison crash.
+    # same clamp for the repeat / stall limits: None/0/negative must mean
+    # the module default, never "no limit" and never a comparison crash.
     max_repeated_step = (_as_count(max_repeated_step)
                          or MAX_REPEATED_STEP)
+    scratchpad._max_stall = (_as_count(max_stalled_turns)
+                             or MAX_STALLED_TURNS)
     if scratchpad.turn >= scratchpad._max_turns:
         turn.state = "budget_exhausted"
         turn.action = AgentAction(action=ACT_FINISH, ok=True,
@@ -981,7 +1263,16 @@ def run_loop(scratchpad: AgentScratchpad,
     if llm_call is None:
         source = LOOP_SOURCE_NONE
     else:
-        prompt = build_loop_prompt(scratchpad, observation, history)
+        # v3.5: the conversation window is DERIVED from the agent's own
+        # memory — every accepted past action replays as an assistant
+        # turn, and the outcome that followed it as the user turn. An
+        # explicit `history` argument (server-rendered entries) takes
+        # precedence when supplied. Before this, `blob["history"]` was
+        # always empty and the model restarted amnesic every turn.
+        prompt_history = list(history or [])
+        if not prompt_history:
+            prompt_history = _scratchpad_history(scratchpad)
+        prompt = build_loop_prompt(scratchpad, observation, prompt_history)
         try:
             raw = llm_call({"messages": prompt}, llm_config or {})
             raw_action = _extract_action(raw)
@@ -1008,23 +1299,26 @@ def run_loop(scratchpad: AgentScratchpad,
     turn.action = action
     turn.source = source
 
-    # ---- 2. repeat detection: a stuck agent must not spin ----------- #
-    # Count this *upcoming* occurrence, not just the completed ones: the
-    # check runs before the action is recorded, so comparing against
-    # `done_steps.count(...)` alone would let the loop exceed the limit by
-    # one every time and never actually trip.
+    # ---- 2. exact-repeat detection ---------------------------------- #
+    # Only effectful actions carry a signature (see `AgentAction.
+    # signature`), so `answer` / `ask_user` are structurally outside this
+    # ledger — a dialogue is not a spin. With param VALUES now part of a
+    # capability-call signature, tripping this check means the model
+    # re-proposed the *identical* write after seeing its outcome, which
+    # is evasion, not exploration.
     if not action.is_terminal:
         sig = _sig_key(action)
-        occurrences = scratchpad.repeats(sig) + 1
-        if occurrences > max_repeated_step:
-            turn.state = "budget_exhausted"
-            turn.rejected_reason = turn.rejected_reason or "repeated_step"
-            turn.action = AgentAction(action=ACT_FINISH, ok=True,
-                                      payload={"goal_met": None,
-                                               "why": "the same step was "
-                                                      "proposed repeatedly"})
-            return turn
-        scratchpad.note_repeat(sig)
+        if sig:
+            occurrences = scratchpad.repeats(sig) + 1
+            if occurrences > max_repeated_step:
+                turn.state = "budget_exhausted"
+                turn.rejected_reason = turn.rejected_reason or "repeated_step"
+                turn.action = AgentAction(action=ACT_FINISH, ok=True,
+                                          payload={"goal_met": None,
+                                                   "why": "the same step was "
+                                                          "proposed repeatedly"})
+                return turn
+            scratchpad.note_repeat(sig)
 
     # ---- 3. act ------------------------------------------------------ #
     turn.state = "running"
@@ -1037,11 +1331,14 @@ def run_loop(scratchpad: AgentScratchpad,
         return turn
 
     if action.action == ACT_ASK_USER:
+        # conversation, not progress: OUT of the stall count on purpose
+        # (a question that gets answered is how loops get unstuck).
         turn.state = "awaiting_user"
         turn.speak = action.payload.get("question") or ""
         return turn
 
     if action.action == ACT_ANSWER:
+        # likewise: explaining is not spinning.
         turn.state = "running"
         turn.speak = action.payload.get("text") or ""
         return turn
@@ -1055,7 +1352,8 @@ def run_loop(scratchpad: AgentScratchpad,
 
     if action.action == ACT_PROPOSE_STEP:
         step_id = action.payload.get("step_id")
-        scratchpad.mark_step(_sig_key(action))
+        # ONLY the human-readable id enters the ledger — never the
+        # internal signature (v3.5 single-ledger rule, §14.3).
         if step_id:
             scratchpad.mark_step(step_id)
         turn.state = "running"
@@ -1074,7 +1372,8 @@ def run_loop(scratchpad: AgentScratchpad,
                                                       "proposals"})
             return turn
         scratchpad.note_capability_call()
-        scratchpad.mark_step(_sig_key(action))
+        # execution effects do NOT touch done_steps any more; they land
+        # in `recent_outcomes` once the result is known (§14.3).
 
         request = execution_request(action)
         if run_capability is None:
@@ -1084,6 +1383,7 @@ def run_loop(scratchpad: AgentScratchpad,
             turn.rejected_reason = "no_runner"
             turn.exec_result = {"status": "proposed",
                                 "capability_id": request["capability_id"]}
+            scratchpad.record_outcome(action, turn.exec_result)
             return turn
 
         try:
@@ -1092,10 +1392,14 @@ def run_loop(scratchpad: AgentScratchpad,
             scratchpad.note_error(exc)
             turn.state = "failed"
             turn.exec_result = {"status": "failed", "error": str(exc)}
+            scratchpad.record_outcome(action, turn.exec_result)
             return turn
 
         turn.exec_result = result
         status = (result or {}).get("status")
+        # the outcome ledger records what THIS action did to the world —
+        # the causal chain the next turn reasons on (§14.3/§14.4).
+        scratchpad.record_outcome(action, result)
         if status == "success":
             turn.state = "running"
         elif status == "awaiting_confirmation":
@@ -1103,6 +1407,8 @@ def run_loop(scratchpad: AgentScratchpad,
             # not retry, does not escalate, does not try another route.
             # `speak` is left empty: the confirmation prompt comes from
             # the capability's own `confirmation` payload, not from here.
+            # Parking is not a stall either: the wait is on a human, not
+            # on the model's imagination.
             turn.state = "awaiting_confirmation"
         else:
             # failed / unknown / duplicate: record and let the caller
@@ -1119,10 +1425,137 @@ def run_loop(scratchpad: AgentScratchpad,
     return turn
 
 
+# ===================================================================== #
+# v3.5 progress-based stall detection (docs/CONFIG.md §14.5)
+# ===================================================================== #
+#: Actions whose whole job is to move the world forward. Conversation
+#: (`answer`, `ask_user`) and termination (`finish`, `delegate_pick`)
+#: are excluded: stalling is about *effectful* turns that produced
+#: neither a world change nor new information.
+EFFECTFUL_ACTIONS = (ACT_PROPOSE_STEP, ACT_CALL_CAPABILITY)
+
+#: Outcomes that BY THEMSELVES teach the agent something new even when
+#: the record did not move: a park hands control to a human, a failure
+#: or an unknown result is evidence to reason on. Treating these as
+#: "no progress" would punish exactly the self-correction the reasoning
+#: model exists for.
+INFORMATIVE_STATUSES = ("awaiting_confirmation", "failed", "unknown",
+                        "duplicate", "proposed")
+
+
+def _world_fingerprint(world_state):
+    """Canonical, hashable form of the observable world slice.
+
+    JSON-sorted so key order and int/str key spelling cannot fake a
+    "change". Empty / malformed input fingerprints as "", which compares
+    equal to the initial `None` fingerprint only after normalisation —
+    see `note_progress`'s first-turn semantics (first sighting of a
+    fingerprint counts as change).
+    """
+    import json
+    try:
+        return json.dumps(world_state or {}, sort_keys=True,
+                          ensure_ascii=False, default=str)
+    except (TypeError, ValueError):                      # pragma: no cover
+        return ""
+
+
+def fold_turn_progress(scratchpad, action, observation=None,
+                       exec_result=None):
+    """Fold ONE finished turn into the scratchpad's progress ledger.
+
+    Returns True when the loop is STALLED — `MAX_STALLED_TURNS` (or the
+    injected value) consecutive effectful turns that changed neither the
+    world state nor brought in new information. This is the v3.5 spin
+    test: textual repetition is irrelevant, *progress* is the signal.
+
+    Callers: the Odoo layer after each `_agent_step` (the pure loop
+    cannot see cross-turn world deltas by itself — the server observes
+    the record again on the next turn and calls this with both halves).
+    Non-effectful actions return False without touching the counter.
+    """
+    if action is None or getattr(action, "action", None) \
+            not in EFFECTFUL_ACTIONS:
+        return False
+    world_fp = _world_fingerprint(
+        getattr(observation, "world_state", None))
+    status = (exec_result or {}).get("status")
+    gained_new_info = status in INFORMATIVE_STATUSES
+    return scratchpad.note_progress(world_fp, gained_new_info)
+
+
 def _sig_key(action) -> str:
-    """Signature as a hashable string, for scratchpad bookkeeping."""
+    """Signature as a hashable string, for scratchpad bookkeeping.
+
+    Returns "" for actions that are not progress (ask_user / answer /
+    finish / delegate_pick): an empty key is skipped by the repeat
+    ledger, which is how conversation stays out of spin detection.
+    """
+    if action.action not in (ACT_CALL_CAPABILITY, ACT_PROPOSE_STEP):
+        return ""
     return "|".join("" if part is None else str(part)
                     for part in action.signature)
+
+
+def _canon_params(params) -> tuple:
+    """Canonical, comparable form of a capability call's params.
+
+    JSON with sorted keys so {1: "a"} and {"1": "a"}, or two spellings of
+    the same nested structure, cannot fake distinct identities. Falls
+    back to repr for exotic values — this feeds equality, never a wire
+    format, so a stable-but-ugly canonicalisation beats a crash.
+    """
+    import json
+    try:
+        return ("json", json.dumps(params or {}, sort_keys=True,
+                                   ensure_ascii=False, default=str))
+    except (TypeError, ValueError):                      # pragma: no cover
+        return ("repr", repr(sorted((params or {}).items(),
+                                    key=lambda kv: str(kv[0]))))
+
+
+def _scratchpad_history(scratchpad) -> List[Dict[str, Any]]:
+    """Derive the multi-turn prompt window from the agent's own memory.
+
+    v3.5 (§14.4): the model must see what it already did and what came
+    of it. The reconstruction pairs each outcome-ledger entry with the
+    turn number it happened on; steps narrated via `propose_step` appear
+    through `done_steps`. Only server-recorded data is replayed — never
+    raw transcriptions, never another session's rows — and the result is
+    bounded like any explicit history would be (`MAX_PROMPT_TURNS`).
+
+    An explicit `history` argument to `run_loop` takes precedence: this
+    is the fallback chain of causality, not a second source of truth.
+    """
+    messages: List[Dict[str, Any]] = []
+    outcomes = list(getattr(scratchpad, "recent_outcomes", ()) or ())
+    done = list(getattr(scratchpad, "done_steps", ()) or ())
+    narrated_at = {}
+    for idx, step_id in enumerate(done):
+        narrated_at.setdefault(idx + 1, step_id)
+    for i, entry in enumerate(outcomes[-MAX_PROMPT_TURNS:],
+                              start=len(outcomes) - MAX_PROMPT_TURNS):
+        if not isinstance(entry, dict):
+            continue
+        step_id = narrated_at.get(entry.get("turn"))
+        if step_id:
+            messages.append({"role": "assistant",
+                             "content": '{"action": "propose_step", '
+                                         '"payload": {"step_id": "%s"}}'
+                                         % step_id})
+        messages.append({
+            "role": "assistant",
+            "content": '{"action": "call_capability", "payload": '
+                       '{"capability_id": "%s"}}'
+                       % (entry.get("capability_id") or ""),
+        })
+        messages.append({
+            "role": "user",
+            "content": '{"outcome": {"status": "%s", "detail": "%s"}}'
+                       % (entry.get("status") or "",
+                          str(entry.get("detail") or "")[:200]),
+        })
+    return messages[-MAX_PROMPT_TURNS * 3:]
 
 
 def _sig_text(value):

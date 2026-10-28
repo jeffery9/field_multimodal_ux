@@ -29,7 +29,8 @@ from ..services.mmux_core import (
     SOURCE_LLM, SOURCE_FALLBACK, SOURCE_EMPTY,
     AgentAction, AgentObservation, AgentScratchpad, AgentTurn,
     validate_action, build_loop_prompt, step_from_action,
-    execution_request, run_loop,
+    execution_request, run_loop, fold_turn_progress,
+    MAX_PROMPT_TURNS,
     AGENT_ACTIONS, LOOP_STATES,
     LOOP_SOURCE_LLM, LOOP_SOURCE_RECIPE, LOOP_SOURCE_NONE,
     ContextSignal, ScenarioResolution, validate_scenario_choice,
@@ -42,6 +43,13 @@ from ..services.mmux_core import (
     normalize_lang, resolve_text, detect_languages,
     mixed_language_hint,
 )
+
+#: Bound on the persisted conversation history in a loop blob. The pure
+#: core caps the *prompt window* (MAX_PROMPT_TURNS); the blob keeps a
+#: little more so a resumed session can rebuild context even after a
+#: rejected turn. Both bounds exist because unbounded memory in a
+#: prompt is a token leak waiting to happen (docs/CONFIG.md §14.4).
+MAX_AGENT_HISTORY = MAX_PROMPT_TURNS * 3
 
 
 class MmuxService(models.AbstractModel):
@@ -297,12 +305,20 @@ class MmuxService(models.AbstractModel):
     def _agent_observe(self, blob, loop_key, last_result=None, answers=None):
         """Build the observation for the next turn.
 
-        Deliberately narrow: the goal, the current task, the step the
-        operator is on, the recipe's remaining steps, the last outcome and
-        the answers so far. It is *not* a database view — the model never
-        receives another user's records, other pending tasks, prices or
-        customer details beyond the localized title the operator can
-        already see on screen.
+        Deliberately narrow: the goal, the current task, the standard
+        operating procedure (the scenario-defined recipe) annotated with
+        the server's progress ledger, the bounded world state of the
+        record under work, the last outcome and the answers so far. It is
+        *not* a database view — the model never receives another user's
+        records, other pending tasks, prices or customer details beyond
+        the localized title the operator can already see on screen.
+
+        v3.5 reasoning-first: the recipe is handed over WHOLE as the SOP
+        reference (`recipe_reference` in the prompt), not as one cursor
+        line. The `done_ids` ledger annotates each step with what has
+        actually been completed, and `current_step` remains only as the
+        deterministic fallback's narration point — the model sees it as a
+        per-step `next` marker it may disagree with, never as a command.
         """
         lang = self._user_lang()
         skill = blob.get("skill_level") or self._user_skill_level()
@@ -342,7 +358,49 @@ class MmuxService(models.AbstractModel):
             answers=answers or {},
             available_capabilities=self._agent_allowed_capabilities(
                 blob.get("scenario", "")),
+            # the server's authoritative progress ledger, used by the
+            # pure core ONLY to annotate recipe_reference with `done`
+            # markers (docs/CONFIG.md §14.2). One source, no drift.
+            done_ids=blob.get("done_ids") or [],
+            world_state=self._agent_world_state(blob),
         )
+
+    # -------------------------------------------------------------- #
+    # _agent_world_state
+    # -------------------------------------------------------------- #
+    @api.model
+    def _agent_world_state(self, blob):
+        """Bounded view of the record under work, for the observation.
+
+        The reasoning agent needs to know what the world already looks
+        like — otherwise it cannot decide whether an SOP step still has
+        to run ("quantity already reported -> do not report again").
+        This collector deliberately exposes ONLY fields the operator can
+        already see in the loop view (task identity, progress ledger,
+        outcome trail); it never reads arbitrary columns of the business
+        record. A deployment that wants richer world state visible to
+        the model must extend this method explicitly — the whitelist
+        lives here, at the server edge, never in the model's hands.
+        """
+        state = {}
+        if blob.get("task_id"):
+            state["task"] = {
+                "task_id": blob.get("task_id"),
+                "res_model": blob.get("res_model"),
+                "completed": bool(blob.get("task_completed")),
+            }
+        done = list(blob.get("done_ids") or [])
+        if done:
+            state["steps_done"] = len(done)
+        last = blob.get("last_result")
+        if isinstance(last, dict) and last:
+            state["last_action"] = {
+                k: last.get(k) for k in ("state", "action", "exec_status")
+                if last.get(k) is not None}
+        parked = blob.get("pending_confirmation")
+        if isinstance(parked, dict) and parked.get("capability_id"):
+            state["awaiting_confirmation_for"] = parked["capability_id"]
+        return state
 
     # -------------------------------------------------------------- #
     # _agent_run_capability
@@ -624,6 +682,7 @@ class MmuxService(models.AbstractModel):
             else:
                 scratch.answer(field, answer)
             blob.pop("pending_field", None)
+            blob.pop("pending_options", None)   # consumed: chips are gone
             if field != "scenario":
                 blob["last_result"] = {"answered": True, "field": field}
 
@@ -658,19 +717,61 @@ class MmuxService(models.AbstractModel):
         # budgets come from configuration (settings page); the pure core
         # falls back to its module defaults on anything invalid, so an
         # empty/absent parameter behaves exactly like before v19.0.6.
+        # v3.5 per-turn idempotency: the OLD fixed key `{loop_key}:agent`
+        # made every capability call inside one loop look like a replay of
+        # the first, so a legitimate corrected retry (wrong quantity ->
+        # right quantity) was silently swallowed as `duplicate` by the
+        # guard. Turn-scoped keys let retries through while a same-turn
+        # double-submit (client retry of one HTTP step) still dedupes —
+        # `scratch.turn` only advances inside `run_loop`, once per step.
+        turn_no = int(getattr(scratch, "turn", 0) or 0)
         turn = run_loop(
             scratch, observation,
             llm_call=llm_call,
             llm_config=config,
             run_capability=lambda req: self._agent_run_capability(
-                dict(req, idem_key=f"{loop_key}:agent")),
+                dict(req, idem_key=f"{loop_key}:agent:{turn_no}")),
             allowed_capabilities=observation.available_capabilities,
             history=blob.get("history") or [],
             **self._agent_budgets(),
         )
         self._agent_apply(scratch, blob, turn, loop_key)
+        self._agent_fold_progress(blob, scratch, turn, observation)
         self._agent_log_turn(scratch, blob, turn, loop_key)
         return turn
+
+    # -------------------------------------------------------------- #
+    # _agent_fold_progress
+    # -------------------------------------------------------------- #
+    @api.model
+    def _agent_fold_progress(self, blob, scratch, turn, observation):
+        """Fold the finished turn into the v3.5 progress ledger.
+
+        Pure bookkeeping on top of `fold_turn_progress`: it records the
+        stalled flag in the blob (server-side audit; never model memory)
+        and appends the turn to the bounded conversation history that the
+        next observation replays. History is capped so a long-running
+        session cannot grow the prompt without limit.
+        """
+        stalled = fold_turn_progress(scratch, turn.action, observation,
+                                     turn.exec_result)
+        if stalled:
+            blob["stalled"] = True
+            blob.setdefault("trace", []).append(
+                {"event": "stalled", "turn": scratch.turn})
+        action = turn.action
+        if action is not None and getattr(action, "ok", False):
+            entry = {"role": "assistant",
+                     "turn": scratch.turn,
+                     "content": json.dumps({
+                         "action": action.action,
+                         "payload": {k: v for k, v in action.payload.items()
+                                     if k in ("step_id", "capability_id",
+                                             "question", "field", "why")}},
+                         ensure_ascii=False)}
+            history = list(blob.get("history") or [])
+            history.append(entry)
+            blob["history"] = history[-MAX_AGENT_HISTORY:]
 
     # -------------------------------------------------------------- #
     # _agent_apply
@@ -698,6 +799,15 @@ class MmuxService(models.AbstractModel):
         if action.action == "ask_user":
             blob["pending_field"] = action.payload.get("field")
             blob["pending_question"] = action.payload.get("question")
+            # v3.5 symmetric read/write: `_agent_view` renders
+            # `blob["pending_options"]`, but nothing ever wrote it for
+            # agent-driven questions, so the UI option chips were lost.
+            # The scenario-context path writes the SAME key with its own
+            # candidates; this closes the other half of the channel.
+            options = action.payload.get("options") or []
+            blob["pending_options"] = [
+                {"value": o, "label": o} if isinstance(o, str) else o
+                for o in options if isinstance(o, (str, dict))]
             return
 
         # a proposed step advances the recipe cursor — and ONLY the

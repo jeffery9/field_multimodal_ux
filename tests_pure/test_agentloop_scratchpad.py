@@ -186,12 +186,22 @@ class TestDegradationAlwaysAvailable(unittest.TestCase):
         self.assertEqual(t.state, "finished_all")
 
     def test_recipe_skips_a_step_already_done(self):
-        """The recipe must not re-narrate a finished step — the scratchpad
-        is the reason it can tell."""
+        """The deterministic fallback must not re-narrate a finished
+        step — the scratchpad is the reason it can tell.
+
+        v3.5: with the SOP present in `steps`, an exhausted procedure
+        escalates to the task agent (`delegate_pick`) instead of closing
+        out blindly — "the script ran out, reasoning is needed".
+        """
         s = AgentScratchpad(done_steps=["s1"])
-        t = run_loop(s, obs(current_step=recipe_step("s1")))
-        # nothing left to narrate -> the recipe closes out
-        self.assertEqual(t.action.action, ACT_FINISH)
+        t = run_loop(s, obs(current_step=recipe_step("s1"),
+                            steps=[recipe_step("s1")]))
+        self.assertEqual(t.action.action, ACT_DELEGATE_PICK)
+        # no SOP context at all -> unchanged pre-v3.5 behaviour: close
+        # out rather than invent content for the degraded mode.
+        t2 = run_loop(AgentScratchpad(done_steps=["s1"]),
+                      obs(current_step=recipe_step("s1")))
+        self.assertEqual(t2.action.action, ACT_FINISH)
 
     def test_hallucination_does_not_stop_the_operator(self):
         call = lambda p, c: {"data": {"action": ACT_CALL_CAPABILITY,
@@ -291,6 +301,222 @@ class TestLocalization(unittest.TestCase):
             a = validate_action({"action": ACT_ANSWER,
                                  "payload": {"text": bad}}, WHITELIST)
             self.assertIsInstance(a, AgentAction)
+
+
+# ===================================================================== #
+# v3.5 reasoning-first: SOP reference, single ledger, progress stall
+# ===================================================================== #
+class TestSOPReference(unittest.TestCase):
+    """The recipe arrives as an annotated standard operating procedure,
+    never as a bare cursor the model must recite (docs/CONFIG.md §14.2).
+    """
+
+    def _prompt_payload(self, done_ids=(), current=None, world=None):
+        import json
+        o = obs(steps=[recipe_step("s1"), recipe_step("s2")],
+                current_step=current or recipe_step("s1"),
+                done_ids=list(done_ids),
+                world_state=world or {"steps_done": len(done_ids)})
+        msgs = build_loop_prompt(AgentScratchpad(lang="zh_CN"), o)
+        return json.loads(msgs[-1]["content"].split("\n", 1)[-1]) \
+            if False else msgs[-1]["content"]
+
+    def test_observation_carries_annotated_recipe_not_a_cursor(self):
+        o = obs(steps=[recipe_step("s1"), recipe_step("s2")],
+                current_step=recipe_step("s2"),
+                done_ids=["s1"])
+        d = o.to_prompt_dict()
+        self.assertNotIn("current_step", d)      # no bare cursor any more
+        self.assertNotIn("steps_remaining", d)   # nor a queue length
+        ref = d["recipe_reference"]
+        self.assertEqual([e["step_id"] for e in ref], ["s1", "s2"])
+        self.assertTrue(ref[0]["done"])          # server ledger annotates
+        self.assertFalse(ref[0]["next"])
+        self.assertTrue(ref[1]["next"])
+        self.assertFalse(ref[1]["done"])
+
+    def test_world_state_and_outcomes_reach_the_prompt(self):
+        o = obs(world_state={"task": {"completed": True}},
+                recent_outcomes=[{"turn": 1, "capability_id": "x",
+                                  "status": "success", "detail": "ok"}])
+        d = o.to_prompt_dict()
+        self.assertEqual(d["world_state"], {"task": {"completed": True}})
+        self.assertEqual(len(d["recent_outcomes"]), 1)
+
+    def test_prompt_declares_sop_semantics(self):
+        msgs = build_loop_prompt(AgentScratchpad(),
+                                 obs(steps=[recipe_step("s1")]))
+        system = msgs[0]["content"]
+        self.assertIn("standard operating procedure", system)
+        self.assertIn("NOT as a queue", system)
+        # reasoning-first wording replaced the old script-following hint
+        self.assertNotIn("Prefer `propose_step` while the operator",
+                         system)
+
+
+class TestSingleLedger(unittest.TestCase):
+    """done_steps holds ONLY human-readable step ids; capability effects
+    live in recent_outcomes (§14.3)."""
+
+    def test_mark_step_refuses_internal_signatures(self):
+        s = AgentScratchpad()
+        s.mark_step("call_capability:product_lookup:1")   # pollution
+        s.mark_step(7)                                     # not a str
+        s.mark_step("s1")                                  # legit id
+        self.assertEqual(s.done_steps, ["s1"])
+
+    def test_capability_effect_goes_to_outcome_ledger(self):
+        call = lambda p, c: {"data": {"action": ACT_CALL_CAPABILITY,
+                                      "payload": {
+                                          "capability_id": "product_lookup",
+                                          "record_id": 1,
+                                          "params": {"quantity": 5}}}}
+        runner = lambda req: {"status": "success",
+                              "result": {"qty": 5}}
+        s = AgentScratchpad()
+        t = run_loop(s, obs(), llm_call=call, run_capability=runner)
+        self.assertEqual(t.state, "running")
+        self.assertEqual(s.done_steps, [])            # no signature leak
+        self.assertEqual(len(s.recent_outcomes), 1)   # effect recorded
+        entry = s.recent_outcomes[0]
+        self.assertEqual(entry["capability_id"], "product_lookup")
+        self.assertEqual(entry["status"], "success")
+
+    def test_recent_outcomes_are_bounded(self):
+        from mmux_core.agentloop import MAX_RECENT_OUTCOMES
+        s = AgentScratchpad()
+        action = validate_action(
+            {"action": ACT_CALL_CAPABILITY,
+             "payload": {"capability_id": "product_lookup",
+                         "record_id": 1}}, WHITELIST)
+        for i in range(MAX_RECENT_OUTCOMES + 4):
+            s.record_outcome(action, {"status": "success",
+                                      "result": {"i": i}})
+        self.assertEqual(len(s.recent_outcomes), MAX_RECENT_OUTCOMES)
+        self.assertEqual(s.recent_outcomes[-1]["detail"],
+                         str({"i": MAX_RECENT_OUTCOMES + 3}))
+
+    def test_from_dict_sanitises_hand_edited_outcomes(self):
+        back = AgentScratchpad.from_dict({
+            "goal": "g",
+            "recent_outcomes": [{"status": "ok"}, "junk", 5, None]})
+        self.assertEqual(back.recent_outcomes, [{"status": "ok"}])
+
+
+class TestProgressStall(unittest.TestCase):
+    """Spin detection is about PROGRESS, not textual repetition (§14.5)."""
+
+    def _cap_action(self, quantity):
+        # distinct record ids keep the exact-repeat ledger out of these
+        # tests: the stall counter must trip on ABSENCE OF PROGRESS,
+        # never on textual repetition (that is the repeat ledger's job).
+        return validate_action(
+            {"action": ACT_CALL_CAPABILITY,
+             "payload": {"capability_id": "picking_report_qty",
+                         "record_id": int(quantity),
+                         "params": {"quantity": quantity}}}, WHITELIST)
+
+    def _fold(self, s, world, action, status="success"):
+        from mmux_core.agentloop import fold_turn_progress
+        o = obs(world_state=world)
+        return fold_turn_progress(s, action, o, {"status": status})
+
+    def test_corrected_retry_is_not_a_stall(self):
+        s = AgentScratchpad()
+        s._max_stall = 3
+        w = {"q": 5}
+        self.assertFalse(self._fold(s, w, self._cap_action(5)))
+        # same text would have tripped the OLD repeat rule; here the
+        # world moved (5 -> 9), so the counter resets.
+        self.assertFalse(self._fold(s, {"q": 9}, self._cap_action(9)))
+
+    def test_no_world_change_no_new_info_trips_after_k_turns(self):
+        s = AgentScratchpad()
+        s._max_stall = 3
+        # one fixed world: nothing moves, nothing is learned. Distinct
+        # record ids keep the exact-repeat ledger silent so ONLY the
+        # stall counter can trip — which is exactly the point (§14.5).
+        w = {"q": "same"}
+        stalled = [self._fold(s, w, self._cap_action(i))
+                   for i in range(4)]
+        self.assertEqual(stalled, [False, False, True, True])
+
+    def test_informative_status_resets_the_stall(self):
+        s = AgentScratchpad()
+        s._max_stall = 3
+        w = {}
+        self._fold(s, w, self._cap_action(5))
+        # parked on a human: no world change, but new information —
+        # punishing that would penalise exactly the escalation we want.
+        self.assertFalse(self._fold(s, w, self._cap_action(5),
+                                   status="awaiting_confirmation"))
+
+    def test_conversation_is_outside_the_stall_ledger(self):
+        from mmux_core.agentloop import fold_turn_progress
+        s = AgentScratchpad()
+        s._max_stall = 1
+        ask = validate_action({"action": ACT_ASK_USER,
+                               "payload": {"field": "qty",
+                                           "question": "多少?"}}, WHITELIST)
+        ans = validate_action({"action": ACT_ANSWER,
+                               "payload": {"text": "好的"}}, WHITELIST)
+        for _ in range(5):
+            self.assertFalse(fold_turn_progress(s, ask, obs(), None))
+            self.assertFalse(fold_turn_progress(s, ans, obs(), None))
+
+
+class TestDerivedHistory(unittest.TestCase):
+    """§14.4: the prompt window is built from the agent's own memory,
+    so a resumed session is not amnesic every turn."""
+
+    def test_outcomes_replay_as_assistant_user_pairs(self):
+        s = AgentScratchpad(recent_outcomes=[
+            {"turn": 1, "capability_id": "product_lookup",
+             "status": "success", "detail": "found"}])
+        msgs = build_loop_prompt(s, obs(), history=None)
+        body = [m for m in msgs if m["role"] != "system"]
+        self.assertTrue(any(m["role"] == "assistant"
+                            and "product_lookup" in m["content"]
+                            for m in body))
+        self.assertTrue(any(m["role"] == "user" and "found" in m["content"]
+                            for m in body))
+
+    def test_explicit_history_wins_over_derivation(self):
+        s = AgentScratchpad(recent_outcomes=[
+            {"turn": 1, "capability_id": "zzz", "status": "success",
+             "detail": "d"}])
+        explicit = [{"role": "assistant", "content": '{"a":1}'},
+                    {"role": "user", "content": "{}"}]
+        msgs = build_loop_prompt(s, obs(), history=explicit)
+        joined = " ".join(m["content"] for m in msgs)
+        self.assertNotIn("zzz", joined)
+
+    def test_run_loop_without_history_arg_still_sees_its_past(self):
+        """End-to-end: after a capability ran, the NEXT turn's prompt
+        contains the outcome — before v3.5 the model restarted blind."""
+        seq = [
+            {"action": ACT_CALL_CAPABILITY,
+             "payload": {"capability_id": "product_lookup",
+                         "record_id": 1}},
+            {"action": ACT_ANSWER, "payload": {"text": "查到了"}},
+        ]
+        state = {"i": 0}
+
+        def call(payload, config):
+            i = min(state["i"], len(seq) - 1)
+            state["i"] += 1
+            return {"data": seq[i]}
+
+        s = AgentScratchpad()
+        runner = lambda req: {"status": "success", "result": {"sku": "A1"}}
+        run_loop(s, obs(), llm_call=call, run_capability=runner)   # turn 1
+        run_loop(s, obs(), llm_call=call, run_capability=runner)   # turn 2
+        second_prompt = None
+        state["i"] = 1
+        run_loop(s, obs(), llm_call=lambda p, c: (
+            second_prompt := p) or {"data": seq[1]})
+        joined = " ".join(m["content"] for m in second_prompt["messages"])
+        self.assertIn("product_lookup", joined)
 
 
 if __name__ == "__main__":                      # pragma: no cover
