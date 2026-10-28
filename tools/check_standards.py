@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+# Copyright (C) 2026 jeffery9@gmail.com & geninit
+# License LGPL-3.0 or later (https://www.gnu.org/licenses/lgpl-3.0.html)
 """Enforce the project's coding standards automatically.
 
 `docs/CODING_STANDARDS.md` states the rules; this script makes them
@@ -37,6 +40,11 @@ MODULE_DIRS = sorted(
     d for d in os.listdir(ROOT)
     if d.startswith("mmux_") and os.path.isdir(os.path.join(ROOT, d))
 )
+
+# The project's copyright attribution.  Both the manifest hygiene rule and
+# the per-file header rule (see below) pin against this single constant --
+# one place to change when the holder or year changes.
+COPYRIGHT_HOLDER = "jeffery9@gmail.com & geninit"
 
 
 def py_files(*subdirs):
@@ -246,7 +254,8 @@ def rule_sudo_is_justified():
 # Rule 7 -- manifest hygiene
 # ===================================================================== #
 MANIFEST_ORDER = ["name", "summary", "description", "version", "category",
-                  "author", "license", "depends", "data", "assets",
+                  "author", "maintainers", "license", "copyright",
+                  "depends", "data", "assets",
                   "application", "installable"]
 
 
@@ -263,6 +272,16 @@ def rule_manifests():
             if key not in data:
                 R.fail(path, 1, "odoo-guidelines",
                        f"manifest missing required key '{key}'")
+        # every module must carry the project's copyright attribution --
+        # this is what makes the notice survive a new module (docs say it,
+        # rule 14 checks the file headers, here the manifests are pinned)
+        if data.get("author") != COPYRIGHT_HOLDER:
+            R.fail(path, 1, "odoo-guidelines",
+                   f"manifest author {data.get('author')!r} is not "
+                   f"{COPYRIGHT_HOLDER!r}")
+        if "Copyright" not in str(data.get("copyright", "")):
+            R.fail(path, 1, "odoo-guidelines",
+                   "manifest missing 'copyright' key")
         if not data.get("version", "").startswith("19.0."):
             R.fail(path, 1, "odoo-guidelines",
                    f"version {data.get('version')!r} is not an Odoo 19 version")
@@ -544,6 +563,60 @@ def rule_js_is_well_formed():
     R.ok()
 
 
+# ===================================================================== #
+# Rule 14 -- copyright headers are present everywhere
+#
+# Why this exists: a copyright notice added once by hand decays the first
+# time someone creates a new file.  The manifest `author`/`copyright` keys
+# and the per-file header lines are all checked here, so "the project is
+# Copyright jeffery9@gmail.com & geninit, LGPL-3" stays a pass/fail fact
+# for every future file instead of an intention that silently rots.
+# ===================================================================== #
+PY_HEADER = [
+    "# -*- coding: utf-8 -*-",
+    f"# Copyright (C) 2026 {COPYRIGHT_HOLDER}",
+    "# License LGPL-3.0 or later "
+    "(https://www.gnu.org/licenses/lgpl-3.0.html)",
+]
+
+
+def rule_copyright_headers():
+    paths = []
+    for module in MODULE_DIRS + ["tests_pure", "tools"]:
+        paths.extend(glob.glob(os.path.join(ROOT, module, "**", "*.py"),
+                               recursive=True))
+        paths.extend(glob.glob(os.path.join(ROOT, module, "static", "**",
+                                            "*.js"), recursive=True))
+    for path in sorted(set(paths)):
+        if "node_modules" in path:
+            continue
+        lines = open(path, encoding="utf-8").read().splitlines()
+        head = "\n".join(lines[:5])
+        if os.path.basename(path) == "__manifest__.py":
+            try:
+                data = ast.literal_eval("\n".join(lines))
+            except Exception:
+                continue  # rule_manifests already reports unparsable ones
+            if data.get("author") != COPYRIGHT_HOLDER:
+                R.fail(path, 1, "copyright-header",
+                       "manifest author must be "
+                       f"{COPYRIGHT_HOLDER!r}, got {data.get('author')!r}")
+            if "Copyright" not in str(data.get("copyright", "")):
+                R.fail(path, 1, "copyright-header",
+                       "manifest missing 'copyright' key")
+            continue
+        if path.endswith(".py"):
+            if lines[:3] != PY_HEADER:
+                R.fail(path, 1, "copyright-header",
+                       "missing copyright header (expected the three "
+                       "lines: coding, Copyright, License)")
+        else:  # .js asset
+            if f"Copyright (C) 2026 {COPYRIGHT_HOLDER}" not in head:
+                R.fail(path, 1, "copyright-header",
+                       "JS file missing copyright header block")
+    R.ok()
+
+
 RULES = [
     ("no raw SQL (active record)", rule_no_raw_sql),
     ("no print()", rule_no_print),
@@ -558,6 +631,7 @@ RULES = [
     ("XML is well-formed", rule_xml_is_well_formed),
     ("XML comments are legal", rule_xml_comments_are_legal),
     ("JS is well-formed", rule_js_is_well_formed),
+    ("copyright headers present", rule_copyright_headers),
 ]
 
 
