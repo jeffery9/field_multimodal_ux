@@ -960,3 +960,100 @@ if rec.geo_weight and not rec.geo_collect:
   设置约束语义。此 harness 还**抓到过一个真实缺陷**：预算约束最初用
   `if not value` 判空，会把 `0` 当「未设置」放行——0 预算会让 agent
   完全不可用，必须报错拒绝。已修复并固化。
+
+## 14. 任务会话与推理循环（Task Session & Agent Loop，v3.5 / 19.0.7.0.0）
+
+本节把两件事钉死在一起：**agent loop 的核心工作模式是推理，不是预制工作流
+step**；以及**用户的交互是面向任务的——一个任务 = 一个对话 session**。
+
+### 14.1 会话即任务（session = task）
+
+| 概念 | 定义 |
+|---|---|
+| **Session** | 一次面向任务的完整对话。以 `loop_key` 为身份（`agent:<loop_key>`），承载该任务的**全部推理状态**：目标、世界状态视图、行动轨迹（history）、已完成步骤、待确认动作、待答问题 |
+| **边界** | 任务完成（`finish` / `task/report` 成功）或被放弃/过期 → session **终结**。终结后不再接受任何 `agent_turn` |
+| **切换任务** | 下一个任务是**新 session**（新 `loop_key`），不继承上一个任务的推理记忆。跨 session 只允许携带**经审批的用户级偏好**（如技能等级 `skill_level`、语言），不允许携带任务上下文 |
+| **刷新/切页** | 同一 session 内继续（游标持久化在交互日志中）；这是 §10.8 既有行为的延续，不是跨任务恢复 |
+
+为什么边界必须是任务而不是用户或浏览器会话：推理状态若跨任务泄漏，模型会
+拿着**上一个任务的目标与世界状态**来决策**当前任务**——既错（库存早已变化）
+又危险（上个任务里"已经确认过"的印象可能被复用到这个任务的写入上）。
+Session 边界就是**推理层面的 ACL**。
+
+### 14.2 推理优先，Recipe 降级为参考先验
+
+v3.5 起，观察窗口（observation）**不再由 `current_step` 驱动**。模型看到的不再是
+"脚本走到第几步"，而是：
+
+```
+goal（本 session 的目标）
+  + world_state（服务端采集的记录受限字段视图）
+  + last_result / recent_outcomes（上一动作的效果回执）
+  + history（本 session 内模型自己发过的动作）
+  + recipe_reference（引导流程步骤，整体给出、标注为非强制参考）
+```
+
+- **Prompt 明确声明**：recipe 只是"这个岗位通常怎么做"的先验材料，是否采纳、
+  顺序、跳过哪步，由模型基于证据决定。
+- **确定性兜底不变**：LLM 不可用时仍回落到逐 step 引导（`LOOP_SOURCE_RECIPE`），
+  操作员体验退化为 v3.0 之前的引导流，而不是失败。
+
+### 14.3 单一账本：done_steps 净化
+
+此前有两本账（scratchpad 的 `done_steps` 与 blob 的游标 `done_ids`），且
+`done_steps` 混入了内部签名，回流进 prompt 后污染模型的世界模型。v3.5 改为：
+
+- `done_steps` **只存人类可读的 `step_id`**（模型自己看得懂、也只需看懂的量）；
+- `call_capability` 的执行效果**不进 `done_steps`**，改记入 `recent_outcomes`
+  （有界保留最近 N 条摘要），下一轮 observation 原样呈现——补上
+  "动作 → 世界变化"的因果链；
+- 服务端游标仍是执行侧唯一权威，但**不再作为文本出现在 prompt 里**。
+
+### 14.4 History 接通（session 内多轮）
+
+`blob["history"]` 此前恒空，模型每回合"失忆重启"。现在 `_agent_apply()` 把每次
+被接受的 assistant 动作 JSON 追加进 history（按 `MAX_AGENT_TURNS` 有界截断）。
+回放策略刻意保守：**只回放模型自己的动作**，用户侧证据来自 observation 的
+`last_result / recent_outcomes`，不回灌原始语音转写——少一条注入面。
+
+### 14.5 停滞检测：看进展，不看重复文本
+
+旧的 spin 检测按"动作文本签名重复次数"判停，会误杀合法的自我纠正
+（换个参数重试同一个能力）。v3.5 判定改为：**连续 K 次动作既没有改变
+world_state、也没有获得新信息**才算停滞；`answer` / `ask_user` 移出计数。
+总量防线仍由 §13.1 的三个预算兜底——停滞检测优化的是"别冤枉探索"，
+不是"允许刷量"。
+
+### 14.6 幂等键与会话同生命周期
+
+能力调用的幂等键从固定值改为 `{loop_key}:agent:{turn}`：同一 session 内
+不同回合的调用不再被互相误判为重复；跨 session（新任务）天然隔离。
+L2 的 `awaiting_confirmation` 释放仍要求**同一 session 的确认**——确认不能
+跨任务复用。
+
+### 14.7 配置面
+
+| 项 | 位置 | 说明 |
+|---|---|---|
+| session 内最大回合数 / 能力调用数 / 停滞阈值 | 设置页 → Agent（§13.1） | 语义不变，作用域明确为**单 session**；session 终结即清零 |
+| `mmux.agent.enabled` | 系统参数 / 设置页 | 关闭时 `/mmux/agent/*` 返回结构化错误，任务循环走纯队列路径（§10），不受影响 |
+| recipe 参考开关 | 代码常量 | 刻意**不**做成配置：关掉参考先验等于让模型裸推，属于行为契约而非运维参数 |
+
+### 14.8 安全不变量（不因范式转移而松动）
+
+- 动作集封闭（`AGENT_ACTIONS`）、负载键封闭（`ACTION_PAYLOAD_KEYS`）不变；
+- `confirmed=False` 硬编码 + L2 人工确认门不变；
+- 单请求单步执行、事务隔离、Scenario 白名单不变；
+- 场景仍由服务端推导，模型只能在候选集内消歧（§12 全部适用）；
+- **session 终结后旧 `loop_key` 的任何请求一律拒绝**（`unknown_loop`），
+  不存在"复活上个任务"的路径。
+
+### 14.9 测试与验收
+
+- `tests_pure/test_agentloop_run.py`：observation 含 `recipe_reference` 而非
+  `current_step` 驱动、`done_steps` 无内部签名、history 有界增长、
+  进展型停滞检测（重试合法、原地打转被抓）。
+- `mmux_core/tests/test_mmux_taskloop_agent.py`：session 终结后 turn 被拒、
+  新任务新 session 不继承旧 goal/history、per-turn 幂等键、
+  pending_options 读写对称。
+- 验收用例见 [docs/ACCEPTANCE.md §10.10](ACCEPTANCE.md)。

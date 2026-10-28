@@ -34,6 +34,10 @@
 - **权限严格受控**：智能体的自主性**只到"选择"为止**——它没有任何执行权限。
   任何写操作仍必须走白名单能力 + L2 人工确认（FR-014/015/016 完全不变）。
 - **服务端驱动**：游标持久化在交互日志中，**切换页面或刷新后继续同一任务**（含智能体理由）。
+- **会话即任务（v3.5）**：一次**任务 = 一个对话 session**。session 是推理状态的边界——目标、
+  世界状态、行动轨迹、待确认项都只活在本任务内；任务完成或被放弃，session 即终结。
+  下一个任务是**全新的 session**，不继承上一个任务的任何推理记忆（跨任务只保留经审批的
+  用户级偏好，如技能等级）。详见 [docs/CONFIG.md §14](docs/CONFIG.md)。
 - **执行与求助同源**：`task/guide` 把当前任务绑定到对应引导流程（`wh_guided_picking` /
   `mfg_guided_workorder` / `fs_guided_service` / `sales_guided_visit`），`task/help` 用于任务中提问——
   提问可能被解析为**引导提示**，也可能解析为**白名单能力调用**，但绝不会变成"静默的业务写入"。
@@ -67,6 +71,8 @@
 │  · Execution Guard（FR-016 十步链路 + 幂等 + 审计）      │
 │  · Task Queue（任务循环：取任务/完成/发布下一个）        │
 │  · Agent Pick（智能体自主选任务 + 队列兜底）             │
+│  · Agent Loop（推理型循环：决策归模型、执行权留服务端）  │
+│  · Task Session（会话即任务：一任务一 session）          │
 │  · TaskFlow（语音引导 + 新手/熟手双模式）                │
 │  · Plan Orchestrator（受约束多步编排）                   │
 └──────┬──────────────────────┬──────────────────────────┘
@@ -236,6 +242,7 @@ agent 要"选任务"，先得知道**自己身处哪个作业现场**。v3.1 把
 | **任务循环** | `/mmux/task/sources`、`/next`、`/current` | 任务源契约、取下一个任务（**含智能体决策**）、恢复游标 |
 | **任务循环** | `/mmux/task/guide`、`/help`、`/report` | 绑定引导、任务中求助、汇报完成并发布下一个 |
 | **场景上下文** | `/mmux/agent/start`（`signal`） | 位置信号入参；响应追加 `scenario_context` |
+| **智能体循环** | `/mmux/agent/start`、`/mmux/agent/turn` | 推理型循环：一个任务 = 一个 session（`loop_key`），逐回合 observe→decide→validate→act |
 
 > `/mmux/task/next`、`/current`、`/report` 的响应新增 `agent` 键
 > （`source` ∈ `llm` / `queue_fallback` / `no_candidates`，附 `reason`、`confidence`、`alternatives`），

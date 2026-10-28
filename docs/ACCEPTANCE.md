@@ -270,3 +270,58 @@ odoo-bin -d testdb -i mmux_scenario_warehouse,mmux_scenario_mfg \
 | A68 | 位置判定 → 收窄白名单 | `signal` 指向拣货 → 启动 agent | 白名单等于 `CAPABILITY_REGISTRY.for_scenario("warehouse")` 的启用项；他场景能力不在内 |
 | A69 | 位置未知 → 提问 → 继续 | `signal = {}` → 答复 `warehouse` | 提问被消费；后续轮次在 `warehouse` 下继续；刷新后场景不丢 |
 | A70 | 提问跨轮次不漂移 | 答复被拒后再次提问 | 候选集与上一次**完全相同**（同一 `_resolution_from_blob` 重建） |
+
+## 10.10 任务会话与推理循环验收（Task Session & Agent Loop，v3.5）
+
+> 目标：**agent loop 的核心工作模式是推理，不是预制工作流 step**；
+> **一个任务 = 一个对话 session**，切换任务即切换 session。
+> 设计文档见 [docs/CONFIG.md §14](CONFIG.md)。
+
+### 会话即任务（session 边界）
+
+| # | 用例 | 操作 | 期望 |
+|---|---|---|---|
+| S1 | 一任务一 session | `/mmux/agent/start`（带 `loop_key` 的任务游标） | 响应 `loop_key` 即 session 身份；该 session 的记忆行以 `agent:<loop_key>` 为键 |
+| S2 | 刷新恢复同 session | 记录 `loop_key` → 重新 `/mmux/agent/turn {loop_key}` | 目标、history、done_steps、待确认项**原样续上**，不是新 session |
+| S3 | 任务完成即终结 | `finish(goal_met=true)` 或 `task/report` 成功后再发 `agent_turn` | 返回 `code="unknown_loop"` 结构化错误；**不静默开新循环** |
+| S4 | 放弃/过期即终结 | session 超过日志保留期或管理员作废游标后请求 turn | 同上；操作员须从 `task/next` 取任务、起新 session |
+| S5 | 新任务不继承旧记忆 | 完成任务 A → `task/next` 取任务 B → start | B 的 session 中 `goal`/`history`/`done_steps`/`recent_outcomes` **全部为空/仅含 B**；A 的任何推理状态不可见 |
+| S6 | 跨 session 只带用户级偏好 | 检查新 session 初始化 | 允许继承：`skill_level`、语言；**不允许**继承：上一任务的 params/res_id/待确认动作 |
+| S7 | 确认不跨任务复用 | 任务 A 停在 `awaiting_confirmation` → 放弃 A → 对 A 的 loop_key 发 `confirmed=true` | 拒绝（session 已终结）；不存在"用一次确认放行别的任务写入"的路径 |
+
+### 推理优先（非预制 step 驱动）
+
+| # | 用例 | 操作 | 期望 |
+|---|---|---|---|
+| R1 | observation 无游标驱动 | 检查 `/mmux/agent/turn` 响应的 observe 内容 | 含 `goal` / `world_state` / `last_result` / `recipe_reference`；**不含** "current_step 必须执行"式指令 |
+| R2 | recipe 是参考不是脚本 | mock LLM 跳过 recipe 第 2 步直接调合法能力 | 动作被接受（能力在白名单内即可）；轨迹里 `source="llm"`，不被纠正回第 2 步 |
+| R3 | 世界状态可见 | 能力调用改变了记录字段 | 下一轮 observation 的 `world_state` 反映**改后**的值；模型可据此判断"无需重复报数" |
+| R4 | LLM 不可用退化为引导 | 清空 provider 后 start | 逐 step 的 recipe 导航（`LOOP_SOURCE_RECIPE`），操作员体验退化而非报错——兜底路径保留 |
+
+### 账本与历史
+
+| # | 用例 | 操作 | 期望 |
+|---|---|---|---|
+| H1 | done_steps 净化 | 连续多轮后检查 scratchpad | `done_steps` 只含人类可读 `step_id`；**无**内部签名字符串回流进 prompt |
+| H2 | 因果链闭合 | call_capability 成功后看下一轮 | observation 出现对应 `recent_outcomes` 摘要（有界，保留最近 N 条） |
+| H3 | history 有界增长 | 跑满预算回合 | `blob["history"]` 每回合追加且按 `MAX_AGENT_TURNS` 截断；只含模型自己的动作，**不含**原始语音转写 |
+| H4 | pending_options 读写对称 | `ask_user` 带 options → 检查响应与 blob | `pending_options` 被写入并在视图中渲染为按钮；答复后被清空 |
+
+### 停滞检测与幂等
+
+| # | 用例 | 操作 | 期望 |
+|---|---|---|---|
+| P1 | 合法重试不被误杀 | 同一能力换参数重试一次并拿到新结果 | **不**判停滞（有新信息/世界变化即重置计数） |
+| P2 | 原地打转被抓 | 连续 K 次动作既无 world_state 变化也无新信息 | 安全终止并说明原因；不是静默死循环 |
+| P3 | per-turn 幂等键 | 同一 session 两个回合各调一次不同能力 | 两次都执行；第二次**不被**幂等拦截（键为 `{loop_key}:agent:{turn}`） |
+| P4 | 同回合重放被拦 | 网络重试导致同一 turn 的动作重复送达 | 幂等拦截，零重复副作用 |
+
+### 安全不变量回归（范式转移不松动）
+
+| # | 用例 | 操作 | 期望 |
+|---|---|---|---|
+| G1 | 动作集仍封闭 | mock 返回 `{"action":"sql_query"}` | `unknown_action:sql_query` 拒绝 |
+| G2 | 负载键仍封闭 | 合法动作 + 未声明键 | 整条拒绝，不"取好的那一半" |
+| G3 | L2 确认门独立于 session | 推理模式下发起 L2 能力 | 仍停 `awaiting_confirmation`、`confirmed=False` 硬编码；单据未过账 |
+| G4 | 白名单仍由场景钉死 | warehouse session 中提议 mfg 能力 | 拒绝（capability 不在本 session 场景白名单） |
+| G5 | 必然终止 | 任意输入 | 回合/能力/停滞三重预算之一保证循环结束，测试限时通过 |
