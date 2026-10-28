@@ -419,3 +419,14 @@ Odoo 侧覆盖：`test_mmux_taskloop.py`（取任务/优先队列/L2 确认暂�
 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)、
 [docs/PERFORMANCE.md](docs/PERFORMANCE.md)（热路径性能：改了什么，
 以及五个**已排查但刻意不改**的位置及其理由）。
+
+## 版权与许可
+
+Copyright (C) 2026 **jeffery9@gmail.com & geninit**。
+
+本仓库全部代码与文档以 **LGPL-3.0 or later** 许可发布（全文见根目录
+[`LICENSE`](LICENSE)）；各模块 manifest 的 `author` / `copyright` 键、
+每个 `.py` 文件的前三行头注释、每个 `.js` 资产文件的块注释均携带同一
+申明，并由 `tools/check_standards.py` 规则 14（`copyright headers
+present`）机器校验——新增文件漏带头注释会直接 lint 失败。规范条目见
+[docs/CODING_STANDARDS.md](docs/CODING_STANDARDS.md)。
