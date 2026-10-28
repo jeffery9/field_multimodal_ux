@@ -9,8 +9,10 @@ Odoo Field Multimodal UX 内核模块。
     """,
     "version": "19.0.6.0.0",
     "category": "Productivity/Field Operations",
-    "author": "Field Multimodal UX Team",
+    "author": "jeffery9@gmail.com & geninit",
+    "maintainers": ["jeffery9"],
     "license": "LGPL-3",
+    "copyright": "Copyright 2026 jeffery9@gmail.com & geninit. Licensed under LGPL-3.",
     "depends": ["stock", "barcodes", "mail"],
     "data": [
         "security/mmux_security.xml",
